@@ -1,4 +1,4 @@
-package com.wdtt.client.ui
+package com.tyrnguard.client.ui
 
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
@@ -31,7 +31,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.wdtt.client.SettingsStore
+import com.tyrnguard.client.SettingsStore
+import com.tyrnguard.client.TunnelManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -116,11 +117,11 @@ fun ExceptionsTab() {
                 SingleChoiceSegmentedButtonRow {
                     SegmentedButton(
                         selected = !isWhitelist, shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-                        onClick = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); if (isWhitelist) scope.launch { settingsStore.saveExceptionsMode((appsList.map{it.packageName}.toSet() - selectedPackages).joinToString(","), false); delay(300); com.wdtt.client.TunnelManager.reloadWireGuard() } }
+                        onClick = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); if (isWhitelist) scope.launch { settingsStore.saveExceptionsMode((appsList.map{it.packageName}.toSet() - selectedPackages).joinToString(","), false); delay(300); TunnelManager.reloadWireGuard() } }
                     ) { Text("ЧС") }
                     SegmentedButton(
                         selected = isWhitelist, shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-                        onClick = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); if (!isWhitelist) scope.launch { settingsStore.saveExceptionsMode((appsList.map{it.packageName}.toSet() - selectedPackages).joinToString(","), true); delay(300); com.wdtt.client.TunnelManager.reloadWireGuard() } }
+                        onClick = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); if (!isWhitelist) scope.launch { settingsStore.saveExceptionsMode((appsList.map{it.packageName}.toSet() - selectedPackages).joinToString(","), true); delay(300); TunnelManager.reloadWireGuard() } }
                     ) { Text("БС") }
                 }
             }
@@ -135,7 +136,7 @@ fun ExceptionsTab() {
                     AppRow(app, isSelected) {
                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                         val newList = if (isSelected) selectedPackages - app.packageName else selectedPackages + app.packageName
-                        scope.launch { settingsStore.saveExcludedApps(newList.joinToString(",")); com.wdtt.client.TunnelManager.reloadWireGuard() }
+                        scope.launch { settingsStore.saveExcludedApps(newList.joinToString(",")); TunnelManager.reloadWireGuard() }
                     }
                 }
             }

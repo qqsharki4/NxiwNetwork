@@ -1,4 +1,4 @@
-package com.wdtt.client
+package com.tyrnguard.client
 
 import android.app.PendingIntent
 import android.appwidget.AppWidgetManager

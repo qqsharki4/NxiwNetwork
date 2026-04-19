@@ -1,4 +1,4 @@
-package com.wdtt.client
+package com.tyrnguard.client
 
 import android.annotation.SuppressLint
 import android.content.Context

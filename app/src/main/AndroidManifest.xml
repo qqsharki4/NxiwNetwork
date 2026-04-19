@@ -20,10 +20,9 @@
         android:allowBackup="false"
         android:extractNativeLibs="true"
         android:icon="@mipmap/ic_launcher"
-        android:label="WDTT"
-        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="TyrnGuard" 
         android:supportsRtl="true"
-        android:theme="@style/Theme.WDTTClient">
+        android:theme="@style/Theme.TyrnGuard"> 
 
         <activity
             android:name=".MainActivity"
@@ -38,7 +37,8 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="wdtt" android:host="config" />
+                <!-- ИЗМЕНЕНО: Схема для импорта конфигов -->
+                <data android:scheme="tyrnguard" android:host="config" />
             </intent-filter>
         </activity>
 
@@ -52,7 +52,7 @@
             android:name=".WdttTileService"
             android:exported="true"
             android:icon="@mipmap/ic_launcher"
-            android:label="WDTT VPN"
+            android:label="TyrnGuard" 
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
             <intent-filter>
                 <action android:name="android.service.quicksettings.action.QS_TILE" />

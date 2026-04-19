@@ -1,4 +1,4 @@
-package com.wdtt.client.ui
+package com.tyrnguard.client.ui
 
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -27,8 +27,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.wdtt.client.LogEntry
-import com.wdtt.client.TunnelManager
+import com.tyrnguard.client.LogEntry
+import com.tyrnguard.client.TunnelManager
 
 @Composable
 fun LogsTab() {

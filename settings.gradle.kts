@@ -12,5 +12,6 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "WDTT"
+
+rootProject.name = "TyrnGuard"
 include(":app")

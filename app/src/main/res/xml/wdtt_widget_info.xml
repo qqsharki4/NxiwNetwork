@@ -7,5 +7,6 @@
     android:updatePeriodMillis="0"
     android:initialLayout="@layout/wdtt_widget"
     android:resizeMode="none"
-    android:widgetCategory="home_screen">
+    android:widgetCategory="home_screen"
+    android:label="TyrnGuard">
 </appwidget-provider>

@@ -1,4 +1,4 @@
-package com.wdtt.client
+package com.tyrnguard.client
 
 import android.Manifest
 import android.app.NotificationChannel
@@ -54,11 +54,11 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
-import com.wdtt.client.ui.LogsTab
-import com.wdtt.client.ui.SettingsTab
-import com.wdtt.client.ui.DeployTab
-import com.wdtt.client.ui.ExceptionsTab
-import com.wdtt.client.ui.InfoTab
+import com.tyrnguard.client.ui.LogsTab
+import com.tyrnguard.client.ui.SettingsTab
+import com.tyrnguard.client.ui.DeployTab
+import com.tyrnguard.client.ui.ExceptionsTab
+import com.tyrnguard.client.ui.InfoTab
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -269,7 +269,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// Убран private чтобы не конфликтовать с публичной функцией StretchyNavigationBar
 data class NavItem(val label: String, val selectedIcon: ImageVector, val unselectedIcon: ImageVector)
 
 val navItems = listOf(
@@ -313,7 +312,7 @@ fun MainScreen() {
             )
         }
     ) { padding ->
-        HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize().padding(padding), beyondBoundsPageCount = 1) { page ->
+        HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize().padding(padding), beyondViewportPageCount = 2) { page ->
             Box(modifier = Modifier.graphicsLayer {
                 val pageOffset = ((pagerState.currentPage - page) + pagerState.currentPageOffsetFraction).absoluteValue
                 alpha = 1f - (pageOffset.coerceIn(0f, 1f) * 0.5f)
@@ -354,7 +353,6 @@ fun StretchyNavigationBar(
             val tabWidth = maxWidth / items.size
             val transition = updateTransition(targetState = selectedIndex, label = "tab_transition")
 
-            // Расчет левой и правой границы пилюли для эффекта "тянучки"
             val leftEdge by transition.animateDp(
                 transitionSpec = {
                     if (targetState > initialState) spring(dampingRatio = 0.65f, stiffness = 150f) 
@@ -369,7 +367,6 @@ fun StretchyNavigationBar(
                 }, label = "rightEdge"
             ) { index -> tabWidth * index + (tabWidth / 2) + 32.dp }
 
-            // Сама пилюля-фон
             Box(
                 modifier = Modifier
                     .offset(x = leftEdge, y = 16.dp)
@@ -379,7 +376,6 @@ fun StretchyNavigationBar(
                     .background(MaterialTheme.colorScheme.secondaryContainer)
             )
 
-            // Элементы навигации (иконки и текст поверх пилюли)
             Row(modifier = Modifier.fillMaxSize()) {
                 items.forEachIndexed { index, item ->
                     val selected = selectedIndex == index

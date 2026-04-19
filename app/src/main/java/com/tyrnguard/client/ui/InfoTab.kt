@@ -1,4 +1,4 @@
-package com.wdtt.client.ui
+package com.tyrnguard.client.ui
 
 import android.content.ClipboardManager
 import android.content.Context
@@ -26,6 +26,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -37,8 +38,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.wdtt.client.SettingsStore
-import com.wdtt.client.TunnelManager
+import com.tyrnguard.client.SettingsStore
+import com.tyrnguard.client.TunnelManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -51,8 +52,6 @@ import kotlin.math.roundToInt
 @Composable
 fun InfoTab() {
     var currentScreen by rememberSaveable { mutableStateOf("main") }
-    val context = LocalContext.current
-    val settingsStore = remember { SettingsStore(context) }
 
     BackHandler(enabled = currentScreen != "main") { currentScreen = "main" }
 
@@ -60,66 +59,74 @@ fun InfoTab() {
         AnimatedContent(
             targetState = currentScreen,
             transitionSpec = {
-                val animationSpec = spring<IntOffset>(stiffness = Spring.StiffnessLow)
+                val animationSpec = spring<IntOffset>(stiffness = Spring.StiffnessMedium)
                 if (targetState != "main") {
-                    slideInHorizontally(animationSpec) { it } + fadeIn() togetherWith slideOutHorizontally(animationSpec) { -it } + fadeOut()
+                    slideInHorizontally(animationSpec) { it } + fadeIn() togetherWith slideOutHorizontally(animationSpec) { -it / 2 } + fadeOut()
                 } else {
-                    slideInHorizontally(animationSpec) { -it } + fadeIn() togetherWith slideOutHorizontally(animationSpec) { it } + fadeOut()
+                    slideInHorizontally(animationSpec) { -it / 2 } + fadeIn() togetherWith slideOutHorizontally(animationSpec) { it } + fadeOut()
                 }
             },
-            label = ""
+            label = "settings_navigation"
         ) { screen ->
             when (screen) {
-                "main" -> MainSettingsMenu(settingsStore) { currentScreen = it }
-                "network" -> NetworkSettings(settingsStore) { currentScreen = "main" }
-                "performance" -> PerformanceSettings(settingsStore) { currentScreen = "main" }
-                "interface" -> InterfaceSettings(settingsStore) { currentScreen = "main" }
+                "main" -> MainSettingsMenu { currentScreen = it }
+                "network" -> NetworkSettings { currentScreen = "main" }
+                "performance" -> PerformanceSettings { currentScreen = "main" }
+                "interface" -> InterfaceSettings { currentScreen = "main" }
             }
         }
     }
 }
 
 @Composable
-fun MainSettingsMenu(settingsStore: SettingsStore, onNavigate: (String) -> Unit) {
+fun MainSettingsMenu(onNavigate: (String) -> Unit) {
     val context = LocalContext.current
+    val settingsStore = remember { SettingsStore(context) }
     val scope = rememberCoroutineScope()
     val currentPeer by settingsStore.peer.collectAsStateWithLifecycle("")
     var showImportantInfoDialog by remember { mutableStateOf(false) }
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("Настройки", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 8.dp))
+        
         MenuCategoryItem("Сеть", "Протокол, MTU, DNS", Icons.Default.Language) { onNavigate("network") }
-        MenuCategoryItem("Производительность", "Хеши, Потоки, Капча", Icons.Default.Speed) { onNavigate("performance") }
+        MenuCategoryItem("Производительность", "Ключи, Потоки, Капча", Icons.Default.Speed) { onNavigate("performance") }
         MenuCategoryItem("Интерфейс", "Темы, Цвета, Отклик", Icons.Default.Palette) { onNavigate("interface") }
         
-        CategoryCard("Импорт / Экспорт", Icons.Default.Share) {
+        CategoryCard("Синхронизация", Icons.Default.Share) {
+            Text("Импорт запустит настройку по ссылке из буфера обмена.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 16.dp))
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(
                     modifier = Modifier.weight(1f).height(56.dp), shape = RoundedCornerShape(20.dp),
                     onClick = {
                         val cb = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         val text = cb.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
-                        if (text.contains("wdtt://config?data=")) {
+                        if (text.contains("tyrnguard://config?data=")) {
                             try {
                                 val json = JSONObject(String(Base64.decode(text.substringAfter("data="), Base64.URL_SAFE)))
                                 scope.launch { addServerToStoreDirect(context, settingsStore, json) }
                             } catch (e: Exception) { Toast.makeText(context, "Ошибка чтения ссылки", Toast.LENGTH_SHORT).show() }
-                        } else Toast.makeText(context, "Ссылка не в буфере", Toast.LENGTH_SHORT).show()
+                        } else Toast.makeText(context, "Ссылка не найдена в буфере", Toast.LENGTH_SHORT).show()
                     }
                 ) {
                     Icon(Icons.Default.ContentPasteGo, null); Spacer(Modifier.width(8.dp)); Text("Импорт", fontSize = 16.sp)
                 }
 
-                OutlinedButton(
+                FilledTonalButton(
                     modifier = Modifier.weight(1f).height(56.dp), shape = RoundedCornerShape(20.dp),
                     onClick = {
                         scope.launch {
-                            val servers = JSONArray(settingsStore.savedServersJson.first())
+                            val serversJson = settingsStore.savedServersJson.first()
+                            if (currentPeer.isBlank() || serversJson.isBlank()) { 
+                                Toast.makeText(context, "Сначала выберите сервер на главном экране", Toast.LENGTH_SHORT).show(); return@launch 
+                            }
+                            val servers = JSONArray(serversJson)
                             var activeObj: JSONObject? = null
                             for (i in 0 until servers.length()) { if (servers.getJSONObject(i).optString("ip") == currentPeer) { activeObj = servers.getJSONObject(i); break } }
-                            if (activeObj == null) { Toast.makeText(context, "Выберите сервер", Toast.LENGTH_SHORT).show(); return@launch }
+                            if (activeObj == null) { Toast.makeText(context, "Активный сервер не найден", Toast.LENGTH_SHORT).show(); return@launch }
+                            
                             val b64 = Base64.encodeToString(activeObj.toString().toByteArray(), Base64.URL_SAFE or Base64.NO_WRAP)
-                            context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, "Конфигурация WDTT:\nwdtt://config?data=$b64") }, "Поделиться"))
+                            context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, "Конфигурация TyrnGuard:\n\ntyrnguard://config?data=$b64") }, "Поделиться конфигурацией"))
                         }
                     }
                 ) {
@@ -128,15 +135,17 @@ fun MainSettingsMenu(settingsStore: SettingsStore, onNavigate: (String) -> Unit)
             }
         }
         CategoryCard("О приложении", Icons.Default.Info) {
-            Button(onClick = { showImportantInfoDialog = true }, modifier = Modifier.fillMaxWidth().height(56.dp), shape = RoundedCornerShape(20.dp)) { Text("Важная информация", fontSize = 16.sp) }
-            Spacer(Modifier.height(12.dp))
-            SettingClickRow(Icons.Default.Code, "GitHub", "Исходный код проекта") { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/amurcanov/proxy-turn-vk-android"))) }
+            SettingClickRow(Icons.Default.HelpOutline, "Важная информация", "Справка по работе приложения") { showImportantInfoDialog = true }
+            Divider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+            SettingClickRow(Icons.Default.Code, "GitHub (Форк)", "Исходный код этого приложения") { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/yzewe/TyrnGuard"))) }
+            Divider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+            SettingClickRow(Icons.Default.CodeOff, "GitHub (Оригинал)", "Оригинальный репозиторий проекта") { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/amurcanov/proxy-turn-vk-android"))) }
         }
-        Column(modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        
+        Column(modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 32.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text("Версия 1.0.6 (Stable)", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.outline, fontSize = 14.sp)
-            Spacer(Modifier.height(16.dp))
-            Surface(onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://yzewe.ru"))) }, shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.primary.copy(alpha = 0.05f)) {
-                Text("Форк от yzewe", modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+            FilledTonalButton(onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://yzewe.ru"))) }, shape = RoundedCornerShape(16.dp)) {
+                Text("Форк от yzewe", fontWeight = FontWeight.Bold, fontSize = 14.sp)
             }
         }
     }
@@ -145,18 +154,19 @@ fun MainSettingsMenu(settingsStore: SettingsStore, onNavigate: (String) -> Unit)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun NetworkSettings(settingsStore: SettingsStore, onBack: () -> Unit) {
+fun NetworkSettings(onBack: () -> Unit) {
+    val context = LocalContext.current
+    val settingsStore = remember { SettingsStore(context) }
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
-    val context = LocalContext.current
 
     val protocol by settingsStore.protocol.collectAsStateWithLifecycle("udp")
     val customMtu by settingsStore.customMtu.collectAsStateWithLifecycle(0)
     val dnsType by settingsStore.customDns.collectAsStateWithLifecycle("default")
+    val customDnsIp by settingsStore.customDnsIp.collectAsStateWithLifecycle("1.1.1.1")
     val currentPeer by settingsStore.peer.collectAsStateWithLifecycle("")
     val currentHashes by settingsStore.vkHashes.collectAsStateWithLifecycle("")
     val workersCount by settingsStore.workersPerHash.collectAsStateWithLifecycle(24)
-    val autoConnect by settingsStore.autoConnectOnBoot.collectAsStateWithLifecycle(false)
 
     var lastMtu by remember(customMtu) { mutableIntStateOf(customMtu) }
 
@@ -166,15 +176,15 @@ fun NetworkSettings(settingsStore: SettingsStore, onBack: () -> Unit) {
             Text("Сетевой протокол", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, fontSize = 16.sp)
             Spacer(Modifier.height(12.dp))
             SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                listOf("udp" to "UDP (Быстро)", "tcp" to "TCP (Обход)").forEachIndexed { i, (v, l) ->
+                listOf("udp" to "UDP", "tcp" to "TCP").forEachIndexed { i, (v, l) ->
                     SegmentedButton(
                         selected = protocol == v, shape = SegmentedButtonDefaults.itemShape(index = i, count = 2),
                         onClick = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); scope.launch { settingsStore.save(currentPeer, currentHashes, "", workersCount, v, 9000, "") } }
                     ) { Text(l, fontSize = 14.sp) }
                 }
             }
-            HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp), color = MaterialTheme.colorScheme.outlineVariant)
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Divider(modifier = Modifier.padding(vertical = 16.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text("Размер пакета (MTU)", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                 AnimatedContent(targetState = customMtu, label = "") { mtu -> Text(if (mtu == 0) "Авто" else "$mtu", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, fontSize = 16.sp) }
             }
@@ -187,29 +197,37 @@ fun NetworkSettings(settingsStore: SettingsStore, onBack: () -> Unit) {
                 },
                 onValueChangeFinished = { scope.launch { TunnelManager.reloadWireGuard() } }, valueRange = 1279f..1500f
             )
-            Text("Меньшее значение помогает при плохой связи", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
+            Text("Меньшее значение может помочь при плохой связи. Оптимально: 1280-1420.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
         }
         CategoryCard("DNS Сервер", Icons.Default.Dns) {
             SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                listOf("default" to "Авто", "adguard" to "AdBlock", "cloudflare" to "Cloudflare").forEachIndexed { i, (v, l) ->
+                listOf("default" to "Авто", "adguard" to "AdGuard", "cloudflare" to "Cloudflare", "custom" to "Свой").forEachIndexed { i, (v, l) ->
                     SegmentedButton(
-                        selected = dnsType == v, shape = SegmentedButtonDefaults.itemShape(index = i, count = 3),
+                        selected = dnsType == v, shape = SegmentedButtonDefaults.itemShape(index = i, count = 4),
                         onClick = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); scope.launch { settingsStore.saveCustomDns(v); TunnelManager.reloadWireGuard() } }
-                    ) { Text(l, fontSize = 12.sp, maxLines = 1) }
+                    ) { Text(l, fontSize = 11.sp, maxLines = 1) }
                 }
             }
-            Text(when(dnsType) { "adguard" -> "Блокирует рекламу и трекеры на уровне пакетов."; "cloudflare" -> "Самый быстрый и приватный DNS."; else -> "Использовать DNS провайдера или сервера." }, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 12.dp), fontSize = 14.sp)
-        }
-        CategoryCard("Система", Icons.Default.SettingsSystemDaydream) {
-            SettingSwitchRow(Icons.Default.Power, "Автозапуск", "Включать VPN при загрузке системы", autoConnect) { scope.launch { settingsStore.saveAutoConnect(it) } }
-            SettingClickRow(Icons.Default.VpnLock, "Android Kill Switch", "Запретить трафик без VPN") { try { context.startActivity(Intent("android.net.vpn.SETTINGS").apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }) } catch (e: Exception) { Toast.makeText(context, "Не поддерживается", Toast.LENGTH_SHORT).show() } }
+            AnimatedVisibility(visible = dnsType == "custom", enter = expandVertically(spring(stiffness = Spring.StiffnessMedium)) + fadeIn(), exit = shrinkVertically(spring(stiffness = Spring.StiffnessMedium)) + fadeOut()) {
+                OutlinedTextField(
+                    value = customDnsIp,
+                    onValueChange = { scope.launch { settingsStore.saveCustomDnsIp(it.trim()) } },
+                    label = { Text("IP адрес DNS сервера") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
+                    shape = RoundedCornerShape(20.dp)
+                )
+            }
+            Text(when(dnsType) { "adguard" -> "Блокирует рекламу и трекеры на уровне пакетов."; "cloudflare" -> "Самый быстрый и приватный DNS."; "custom" -> "Впишите IP-адрес предпочитаемого DNS."; else -> "Использовать DNS провайдера или сервера." }, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 12.dp), fontSize = 14.sp)
         }
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PerformanceSettings(settingsStore: SettingsStore, onBack: () -> Unit) {
+fun PerformanceSettings(onBack: () -> Unit) {
+    val context = LocalContext.current
+    val settingsStore = remember { SettingsStore(context) }
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
 
@@ -237,15 +255,19 @@ fun PerformanceSettings(settingsStore: SettingsStore, onBack: () -> Unit) {
                     OutlinedTextField(
                         value = hash,
                         onValueChange = { val l = hashesList.toMutableList(); l[index] = it; updateHashes(l) },
-                        label = { Text("Хэш ${index + 1}") }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), singleLine = true,
+                        label = { Text("Ключ ${index + 1}") }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp), singleLine = true,
                         trailingIcon = { if (hashesList.size > 1) IconButton(onClick = { val l = hashesList.toMutableList(); l.removeAt(index); updateHashes(l) }) { Icon(Icons.Default.DeleteOutline, null, tint = MaterialTheme.colorScheme.error) } }
                     )
                 }
-                if (hashesList.size < 3 && hashesList.last().isNotEmpty()) Button(onClick = { updateHashes(hashesList + "") }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer, contentColor = MaterialTheme.colorScheme.onSecondaryContainer)) { Text("Добавить Хэш") }
+                if (hashesList.size < 3 && hashesList.last().isNotEmpty()) {
+                    FilledTonalButton(onClick = { updateHashes(hashesList + "") }, modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(16.dp)) {
+                        Icon(Icons.Default.Add, null, Modifier.size(20.dp)); Spacer(Modifier.width(8.dp)); Text("Добавить ключ")
+                    }
+                }
             }
         }
         CategoryCard("Нагрузка", Icons.Default.Memory) {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text("Потоки обработки", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                 AnimatedContent(targetState = workersCount, label = "") { wc -> Text("$wc", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, fontSize = 16.sp) }
             }
@@ -274,15 +296,14 @@ fun PerformanceSettings(settingsStore: SettingsStore, onBack: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun InterfaceSettings(settingsStore: SettingsStore, onBack: () -> Unit) {
+fun InterfaceSettings(onBack: () -> Unit) {
+    val context = LocalContext.current
+    val settingsStore = remember { SettingsStore(context) }
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
-    val context = LocalContext.current
 
     val themeMode by settingsStore.themeMode.collectAsStateWithLifecycle("system")
     val dynamicColor by settingsStore.useDynamicColor.collectAsStateWithLifecycle(true)
-    val prefs = remember { context.getSharedPreferences("wdtt_ui_prefs", Context.MODE_PRIVATE) }
-    var vibrationEnabled by remember { mutableStateOf(prefs.getBoolean("vibration", true)) }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         SettingsHeader("Интерфейс", onBack)
@@ -297,16 +318,22 @@ fun InterfaceSettings(settingsStore: SettingsStore, onBack: () -> Unit) {
                     ) { Text(l, fontSize = 12.sp, maxLines = 1) }
                 }
             }
-            HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp), color = MaterialTheme.colorScheme.outlineVariant)
-            SettingSwitchRow(Icons.Default.ColorLens, "Dynamic Colors", "Использовать цвета обоев системы", dynamicColor) { scope.launch { settingsStore.saveDynamicColor(it) } }
-            SettingSwitchRow(Icons.Default.Vibration, "Вибрация", "Тактильный отклик интерфейса", vibrationEnabled) { vibrationEnabled = it; prefs.edit().putBoolean("vibration", it).apply() }
+            Divider(modifier = Modifier.padding(vertical = 16.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+            SettingSwitchRow(
+                icon = Icons.Default.ColorLens,
+                title = "Dynamic Colors",
+                subtitle = "Использовать цвета обоев системы",
+                checked = dynamicColor,
+                enabled = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S,
+                onCheckedChange = { scope.launch { settingsStore.saveDynamicColor(it) } }
+            )
         }
     }
 }
 
 suspend fun addServerToStoreDirect(context: Context, settingsStore: SettingsStore, json: JSONObject) {
     val ip = json.optString("ip", "").trim()
-    val name = json.optString("name", "Новый сервер").trim()
+    val name = json.optString("name", "Импортированный сервер").trim()
     val pass = json.optString("password", "").trim()
     if (ip.isBlank()) return
 
@@ -318,14 +345,14 @@ suspend fun addServerToStoreDirect(context: Context, settingsStore: SettingsStor
     if (existsIdx != -1) currentArray.put(existsIdx, newObj) else currentArray.put(newObj)
     settingsStore.saveServersList(currentArray.toString())
 
-    withContext(Dispatchers.Main) { Toast.makeText(context, "Сервер $name ${if (existsIdx != -1) "обновлен" else "добавлен"}", Toast.LENGTH_SHORT).show() }
+    withContext(Dispatchers.Main) { Toast.makeText(context, "Сервер '$name' ${if (existsIdx != -1) "обновлен" else "добавлен"}", Toast.LENGTH_SHORT).show() }
 }
 
 @Composable
 fun MenuCategoryItem(title: String, subtitle: String, icon: ImageVector, onClick: () -> Unit) {
     Surface(onClick = onClick, shape = RoundedCornerShape(28.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh, modifier = Modifier.fillMaxWidth()) {
         Row(modifier = Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(modifier = Modifier.size(48.dp).background(MaterialTheme.colorScheme.primaryContainer, CircleShape), contentAlignment = Alignment.Center) { Icon(icon, null, tint = MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(24.dp)) }
+            Box(modifier = Modifier.size(48.dp).background(MaterialTheme.colorScheme.secondaryContainer, CircleShape), contentAlignment = Alignment.Center) { Icon(icon, null, tint = MaterialTheme.colorScheme.onSecondaryContainer, modifier = Modifier.size(24.dp)) }
             Spacer(Modifier.width(16.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, fontSize = 18.sp)
@@ -361,23 +388,30 @@ private fun CategoryCard(title: String, icon: ImageVector, content: @Composable 
 private fun SettingClickRow(icon: ImageVector, title: String, subtitle: String, onClick: () -> Unit) {
     val haptic = LocalHapticFeedback.current
     Row(
-        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).clickable { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); onClick() }.padding(vertical = 12.dp, horizontal = 8.dp),
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).clickable { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); onClick() }.padding(horizontal = 8.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(modifier = Modifier.size(44.dp).background(MaterialTheme.colorScheme.surfaceContainerHighest, CircleShape), contentAlignment = Alignment.Center) { Icon(icon, null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(20.dp)) }
         Spacer(Modifier.width(16.dp))
-        Column { Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, fontSize = 16.sp); Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp) }
+        Column(modifier = Modifier.weight(1f)) { 
+            Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp) 
+        }
+        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = MaterialTheme.colorScheme.outline)
     }
 }
 
 @Composable
-private fun SettingSwitchRow(icon: ImageVector, title: String, subtitle: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+private fun SettingSwitchRow(icon: ImageVector, title: String, subtitle: String, checked: Boolean, enabled: Boolean = true, onCheckedChange: (Boolean) -> Unit) {
     val haptic = LocalHapticFeedback.current
-    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp, horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp, horizontal = 4.dp).alpha(if(enabled) 1f else 0.5f), verticalAlignment = Alignment.CenterVertically) {
         Box(modifier = Modifier.size(44.dp).background(MaterialTheme.colorScheme.surfaceContainerHighest, CircleShape), contentAlignment = Alignment.Center) { Icon(icon, null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(20.dp)) }
         Spacer(Modifier.width(16.dp))
-        Column(modifier = Modifier.weight(1f)) { Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, fontSize = 16.sp); Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp) }
-        Switch(checked = checked, onCheckedChange = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); onCheckedChange(it) })
+        Column(modifier = Modifier.weight(1f)) { 
+            Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp) 
+        }
+        Switch(checked = checked, onCheckedChange = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); onCheckedChange(it) }, enabled = enabled)
     }
 }
 
@@ -388,7 +422,7 @@ fun ImportantInfoDialog(onDismiss: () -> Unit) {
             Column(modifier = Modifier.padding(28.dp).verticalScroll(rememberScrollState())) {
                 Text("Справка", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(20.dp))
-                Text("• RJS-Капча — автоматическое решение (экспериментально). В случае проблем верните WebView.\n\n• Диплинки (wdtt://) при экспорте содержат пароль от туннеля в base64. Не передавайте их третьим лицам.\n\n• Если туннель подключается, но интернета нет — обновите Хеши ВК.", style = MaterialTheme.typography.bodyLarge, lineHeight = 24.sp, fontSize = 16.sp)
+                Text("• RJS-Капча — автоматическое решение (экспериментально). В случае проблем верните WebView.\n\n• Ссылки (tyrnguard://) при экспорте содержат пароль от туннеля. Не передавайте их третьим лицам.\n\n• Если туннель подключается, но интернета нет — обновите VK Ключи.", style = MaterialTheme.typography.bodyLarge, lineHeight = 24.sp, fontSize = 16.sp)
                 Spacer(Modifier.height(32.dp))
                 Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth().height(56.dp), shape = RoundedCornerShape(24.dp)) { Text("Закрыть", fontWeight = FontWeight.Bold, fontSize = 16.sp) }
             }

@@ -1,4 +1,4 @@
-package com.wdtt.client
+package com.tyrnguard.client
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -85,8 +85,8 @@ class TunnelService : Service() {
                 acquireWakeLock()
             }
             "DEPLOY_CANCEL" -> {
-                com.wdtt.client.DeployManager.writeError("[!] ❌ Установка отменена пользователем")
-                com.wdtt.client.DeployManager.stopDeploy("error: Отменена пользователем")
+                com.tyrnguard.client.DeployManager.writeError("[!] ❌ Установка отменена пользователем")
+                com.tyrnguard.client.DeployManager.stopDeploy("error: Отменена пользователем")
                 stopForeground(STOP_FOREGROUND_REMOVE)
             }
             "DEPLOY_STOP" -> {

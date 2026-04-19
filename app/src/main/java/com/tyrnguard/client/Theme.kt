@@ -1,4 +1,4 @@
-package com.wdtt.client
+package com.tyrnguard.client
 
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme

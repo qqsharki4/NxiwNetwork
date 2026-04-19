@@ -1,4 +1,4 @@
-package com.wdtt.client
+package com.tyrnguard.client
 
 import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey

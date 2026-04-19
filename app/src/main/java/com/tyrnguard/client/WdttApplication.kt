@@ -1,4 +1,4 @@
-package com.wdtt.client
+package com.tyrnguard.client
 
 import android.app.Application
 import com.wireguard.android.backend.GoBackend
