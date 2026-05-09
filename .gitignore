@@ -1,7 +1,16 @@
 # ===== Gradle =====
 .gradle/
 build/
-local.properties
+client/android/local.properties
+server/deploy/.env
+server/deploy/data/
+client/android/.gradle/
+client/android/build/
+client/android/app/build/
+client/android/app/release/
+client/android/app/debug/
+*.apk
+*.aab
 
 # ===== Android =====
 *.apk
@@ -9,8 +18,8 @@ local.properties
 *.ap_
 *.dex
 *.class
-app/build/
-app/release/
+client/android/app/build/
+client/android/app/release/
 
 # ===== Go =====
 go.sum
@@ -20,11 +29,11 @@ go.sum
 *.dll
 *.dylib
 jniLibs/
-app/src/main/jniLibs/
+client/android/app/src/main/jniLibs/
 
 # ===== Server binary =====
-app/src/main/assets/server
-server
+client/android/app/src/main/assets/server
+# server
 
 # ===== Keystore / Secrets =====
 *.keystore
