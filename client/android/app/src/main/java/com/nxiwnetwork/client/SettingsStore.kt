@@ -7,7 +7,9 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import org.json.JSONObject
 
 class SettingsStore(context: Context) {
     private val appContext = context.applicationContext
@@ -27,6 +29,8 @@ class SettingsStore(context: Context) {
         private val DEPLOY_PASSWORD = stringPreferencesKey("deploy_password")
         private val DEPLOY_SSH_PORT = stringPreferencesKey("deploy_ssh_port")
         private val EXCLUDED_APPS = stringPreferencesKey("excluded_apps")
+        private val ROUTING_ENABLED = booleanPreferencesKey("routing_enabled")
+        private val SHOW_SYSTEM_APPS = booleanPreferencesKey("show_system_apps")
         private val CONNECTION_PASSWORD = stringPreferencesKey("connection_password")
         private val DEPLOY_MAIN_PASSWORD = stringPreferencesKey("deploy_main_password")
         private val DEPLOY_ADMIN_ID = stringPreferencesKey("deploy_admin_id")
@@ -39,7 +43,17 @@ class SettingsStore(context: Context) {
         private val SAVED_SERVERS = stringPreferencesKey("saved_servers_list")
         private val AUTO_CONNECT_ON_BOOT = booleanPreferencesKey("auto_connect_boot")
         private val CUSTOM_DNS = stringPreferencesKey("custom_dns")
-        
+        private val WIFI_HIGH_PERFORMANCE = booleanPreferencesKey("wifi_high_performance")
+        private val CLIENT_KEEPALIVE_SECONDS = intPreferencesKey("client_keepalive_seconds")
+        private val UPDATE_CHANNEL = stringPreferencesKey("update_channel")
+        private val UPDATE_SKIPPED_BY_CHANNEL = stringPreferencesKey("update_skipped_by_channel")
+        private val UPDATE_LATER_UNTIL_BY_CHANNEL = stringPreferencesKey("update_later_until_by_channel")
+        private val REMOTE_CHANGELOG_SEEN_BY_CHANNEL = stringPreferencesKey("remote_changelog_seen_by_channel")
+        private val STARTUP_CHANGELOG_SEEN_BY_CHANNEL = stringPreferencesKey("startup_changelog_seen_by_channel")
+        private val UPDATE_LAST_STATUS = stringPreferencesKey("update_last_status")
+        private val UPDATE_LAST_CHECK_AT = stringPreferencesKey("update_last_check_at")
+        private val UPDATE_RATE_LIMIT_UNTIL = stringPreferencesKey("update_rate_limit_until")
+
         // НОВЫЙ КЛЮЧ ДЛЯ MTU
         private val CUSTOM_MTU = intPreferencesKey("custom_mtu")
 		private val CUSTOM_DNS_IP = stringPreferencesKey("custom_dns_ip")
@@ -50,7 +64,7 @@ class SettingsStore(context: Context) {
     val peer: Flow<String> = dataStore.data.map { it[PEER] ?: "" }
     val vkHashes: Flow<String> = dataStore.data.map { it[VK_HASHES] ?: "" }
     val secondaryVkHash: Flow<String> = dataStore.data.map { it[SECONDARY_VK_HASH] ?: "" }
-    val workersPerHash: Flow<Int> = dataStore.data.map { it[WORKERS_PER_HASH] ?: 16 }
+    val workersPerHash: Flow<Int> = dataStore.data.map { it[WORKERS_PER_HASH] ?: 12 }
     val protocol: Flow<String> = dataStore.data.map { it[PROTOCOL] ?: "udp" }
     val listenPort: Flow<Int> = dataStore.data.map { it[LISTEN_PORT] ?: 9000 }
     val sni: Flow<String> = dataStore.data.map { it[SNI] ?: "" }
@@ -60,6 +74,8 @@ class SettingsStore(context: Context) {
     val deployPassword: Flow<String> = dataStore.data.map { it[DEPLOY_PASSWORD] ?: "" }
     val deploySshPort: Flow<String> = dataStore.data.map { it[DEPLOY_SSH_PORT] ?: "" }
     val excludedApps: Flow<String> = dataStore.data.map { it[EXCLUDED_APPS] ?: "" }
+    val routingEnabled: Flow<Boolean> = dataStore.data.map { it[ROUTING_ENABLED] ?: true }
+    val showSystemApps: Flow<Boolean> = dataStore.data.map { it[SHOW_SYSTEM_APPS] ?: false }
     val connectionPassword: Flow<String> = dataStore.data.map { it[CONNECTION_PASSWORD] ?: "" }
     val deployMainPassword: Flow<String> = dataStore.data.map { it[DEPLOY_MAIN_PASSWORD] ?: "" }
     val deployAdminId: Flow<String> = dataStore.data.map { it[DEPLOY_ADMIN_ID] ?: "" }
@@ -72,7 +88,13 @@ class SettingsStore(context: Context) {
     val savedServersJson: Flow<String> = dataStore.data.map { it[SAVED_SERVERS] ?: "[]" }
     val autoConnectOnBoot: Flow<Boolean> = dataStore.data.map { it[AUTO_CONNECT_ON_BOOT] ?: false }
     val customDns: Flow<String> = dataStore.data.map { it[CUSTOM_DNS] ?: "default" }
-    
+    val wifiHighPerformance: Flow<Boolean> = dataStore.data.map { it[WIFI_HIGH_PERFORMANCE] ?: true }
+    val clientKeepaliveSeconds: Flow<Int> = dataStore.data.map { it[CLIENT_KEEPALIVE_SECONDS] ?: 10 }
+    val updateChannel: Flow<String> = dataStore.data.map { it[UPDATE_CHANNEL] ?: "stable" }
+    val updateLastStatus: Flow<String> = dataStore.data.map { it[UPDATE_LAST_STATUS] ?: "Обновления еще не проверялись" }
+    val updateLastCheckAt: Flow<Long> = dataStore.data.map { it[UPDATE_LAST_CHECK_AT]?.toLongOrNull() ?: 0L }
+    val updateRateLimitUntil: Flow<Long> = dataStore.data.map { it[UPDATE_RATE_LIMIT_UNTIL]?.toLongOrNull() ?: 0L }
+
     // НОВЫЙ FLOW ДЛЯ MTU (0 = Авто)
     val customMtu: Flow<Int> = dataStore.data.map { it[CUSTOM_MTU] ?: 0 }
   
@@ -84,9 +106,14 @@ class SettingsStore(context: Context) {
     suspend fun save(peer: String, vkHashes: String, secondaryVkHash: String, workersPerHash: Int, protocol: String, listenPort: Int, sni: String = "") {
         dataStore.edit { prefs -> prefs[PEER] = peer; prefs[VK_HASHES] = vkHashes; prefs[SECONDARY_VK_HASH] = secondaryVkHash; prefs[WORKERS_PER_HASH] = workersPerHash; prefs[PROTOCOL] = protocol; prefs[LISTEN_PORT] = listenPort; prefs[SNI] = sni }
     }
+    suspend fun saveVkHashes(vkHashes: String) { dataStore.edit { prefs -> prefs[VK_HASHES] = vkHashes } }
+    suspend fun saveWorkersPerHash(workersPerHash: Int) { dataStore.edit { prefs -> prefs[WORKERS_PER_HASH] = workersPerHash.coerceIn(1, 72) } }
+    suspend fun saveProtocol(protocol: String) { dataStore.edit { prefs -> prefs[PROTOCOL] = if (protocol == "tcp") "tcp" else "udp" } }
     suspend fun saveUserAgent(ua: String) { dataStore.edit { prefs -> prefs[USER_AGENT] = ua } }
     suspend fun saveDeploy(ip: String, login: String, pass: String, sshPort: String) { dataStore.edit { prefs -> prefs[DEPLOY_IP] = ip; prefs[DEPLOY_LOGIN] = login; prefs[DEPLOY_PASSWORD] = pass; prefs[DEPLOY_SSH_PORT] = sshPort } }
     suspend fun saveExcludedApps(packages: String) { dataStore.edit { prefs -> prefs[EXCLUDED_APPS] = packages } }
+    suspend fun saveRoutingEnabled(enabled: Boolean) { dataStore.edit { prefs -> prefs[ROUTING_ENABLED] = enabled } }
+    suspend fun saveShowSystemApps(enabled: Boolean) { dataStore.edit { prefs -> prefs[SHOW_SYSTEM_APPS] = enabled } }
     suspend fun saveConnectionPassword(password: String) { dataStore.edit { prefs -> prefs[CONNECTION_PASSWORD] = password } }
     suspend fun saveDeploySecrets(mainPass: String, adminId: String, botToken: String, sshPort: String) { dataStore.edit { prefs -> prefs[DEPLOY_MAIN_PASSWORD] = mainPass; prefs[DEPLOY_ADMIN_ID] = adminId; prefs[DEPLOY_BOT_TOKEN] = botToken; prefs[DEPLOY_SSH_PORT] = sshPort } }
     suspend fun saveCaptchaMode(mode: String) { dataStore.edit { prefs -> prefs[CAPTCHA_MODE] = mode } }
@@ -95,7 +122,52 @@ class SettingsStore(context: Context) {
     suspend fun saveExceptionsMode(packages: String, isWhitelist: Boolean) { dataStore.edit { prefs -> prefs[EXCLUDED_APPS] = packages; prefs[IS_WHITELIST] = isWhitelist } }
     suspend fun saveAutoConnect(enabled: Boolean) { dataStore.edit { prefs -> prefs[AUTO_CONNECT_ON_BOOT] = enabled } }
     suspend fun saveCustomDns(dns: String) { dataStore.edit { prefs -> prefs[CUSTOM_DNS] = dns } }
-    
+    suspend fun saveWifiHighPerformance(enabled: Boolean) { dataStore.edit { prefs -> prefs[WIFI_HIGH_PERFORMANCE] = enabled } }
+    suspend fun saveClientKeepaliveSeconds(seconds: Int) { dataStore.edit { prefs -> prefs[CLIENT_KEEPALIVE_SECONDS] = seconds.coerceIn(5, 60) } }
+    suspend fun saveUpdateChannel(channel: String) {
+        val normalized = when (channel.lowercase()) {
+            "pre", "dev" -> channel.lowercase()
+            else -> "stable"
+        }
+        dataStore.edit { prefs -> prefs[UPDATE_CHANNEL] = normalized }
+    }
+    suspend fun getSkippedUpdateTag(channel: String): String = readStringMap(UPDATE_SKIPPED_BY_CHANNEL).optString(normalizeUpdateChannel(channel), "")
+    suspend fun saveSkippedUpdateTag(channel: String, tag: String) { updateStringMap(UPDATE_SKIPPED_BY_CHANNEL, channel, tag) }
+    suspend fun getUpdateLaterUntil(channel: String): Long = readStringMap(UPDATE_LATER_UNTIL_BY_CHANNEL).optLong(normalizeUpdateChannel(channel), 0L)
+    suspend fun saveUpdateLaterUntil(channel: String, untilMillis: Long) { updateStringMap(UPDATE_LATER_UNTIL_BY_CHANNEL, channel, untilMillis.toString()) }
+    suspend fun getRemoteChangelogSeenKey(channel: String): String = readStringMap(REMOTE_CHANGELOG_SEEN_BY_CHANNEL).optString(normalizeUpdateChannel(channel), "")
+    suspend fun saveRemoteChangelogSeenKey(channel: String, key: String) { updateStringMap(REMOTE_CHANGELOG_SEEN_BY_CHANNEL, channel, key) }
+    suspend fun getStartupChangelogSeenKey(channel: String): String = readStringMap(STARTUP_CHANGELOG_SEEN_BY_CHANNEL).optString(normalizeUpdateChannel(channel), "")
+    suspend fun saveStartupChangelogSeenKey(channel: String, key: String) { updateStringMap(STARTUP_CHANGELOG_SEEN_BY_CHANNEL, channel, key) }
+    suspend fun saveUpdateCheckStatus(status: String, checkedAtMillis: Long = System.currentTimeMillis()) {
+        dataStore.edit { prefs ->
+            prefs[UPDATE_LAST_STATUS] = status
+            prefs[UPDATE_LAST_CHECK_AT] = checkedAtMillis.toString()
+        }
+    }
+    suspend fun saveUpdateStatus(status: String) { dataStore.edit { prefs -> prefs[UPDATE_LAST_STATUS] = status } }
+    suspend fun getUpdateRateLimitUntil(): Long = dataStore.data.first()[UPDATE_RATE_LIMIT_UNTIL]?.toLongOrNull() ?: 0L
+    suspend fun saveUpdateRateLimitUntil(untilMillis: Long) { dataStore.edit { prefs -> prefs[UPDATE_RATE_LIMIT_UNTIL] = untilMillis.toString() } }
+
     // НОВАЯ ФУНКЦИЯ СОХРАНЕНИЯ MTU
     suspend fun saveCustomMtu(mtu: Int) { dataStore.edit { prefs -> prefs[CUSTOM_MTU] = mtu } }
+
+    private suspend fun readStringMap(key: androidx.datastore.preferences.core.Preferences.Key<String>): JSONObject {
+        return runCatching { JSONObject(dataStore.data.first()[key] ?: "{}") }.getOrElse { JSONObject() }
+    }
+
+    private suspend fun updateStringMap(key: androidx.datastore.preferences.core.Preferences.Key<String>, channel: String, value: String) {
+        dataStore.edit { prefs ->
+            val current = runCatching { JSONObject(prefs[key] ?: "{}") }.getOrElse { JSONObject() }
+            current.put(normalizeUpdateChannel(channel), value)
+            prefs[key] = current.toString()
+        }
+    }
+
+    private fun normalizeUpdateChannel(channel: String): String {
+        return when (channel.lowercase()) {
+            "pre", "dev" -> channel.lowercase()
+            else -> "stable"
+        }
+    }
 }

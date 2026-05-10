@@ -67,16 +67,18 @@ class TunnelService : Service() {
                     peer = intent.getStringExtra("peer") ?: "",
                     vkHashes = intent.getStringExtra("vk_hashes") ?: "",
                     secondaryVkHash = intent.getStringExtra("secondary_vk_hash") ?: "",
-                    workersPerHash = intent.getIntExtra("workers_per_hash", 16),
+                    workersPerHash = intent.getIntExtra("workers_per_hash", 12),
                     port = intent.getIntExtra("port", 9000),
                     sni = intent.getStringExtra("sni") ?: "",
                     connectionPassword = intent.getStringExtra("connection_password") ?: "",
                     protocol = intent.getStringExtra("protocol") ?: "udp",
-                    captchaMode = intent.getStringExtra("captcha_mode") ?: "rjs"
+                    captchaMode = intent.getStringExtra("captcha_mode") ?: "rjs",
+                    wifiHighPerformance = intent.getBooleanExtra("wifi_high_performance", true),
+                    clientKeepaliveSeconds = intent.getIntExtra("client_keepalive_seconds", 10)
                 )
                 startTunnel(params)
             }
-            "STOP" -> stopTunnel()
+            "STOP" -> stopTunnel(userRequested = true)
             "DEPLOY_START" -> {
                 val notification = createNotification("Установка на сервер...", "DEPLOY_CANCEL", "Отменить")
                 startPersistentForeground(notification)
@@ -89,7 +91,7 @@ class TunnelService : Service() {
             }
             "DEPLOY_STOP" -> {
                 if (!TunnelManager.running.value) {
-                    stopTunnel()
+                    stopTunnel(userRequested = true)
                 } else {
                     updateNotification("Туннель активен")
                 }
@@ -114,7 +116,9 @@ class TunnelService : Service() {
                     port = store.listenPort.first(),
                     sni = store.sni.first(),
                     connectionPassword = store.connectionPassword.first(),
-                    captchaMode = store.captchaMode.first()
+                    captchaMode = store.captchaMode.first(),
+                    wifiHighPerformance = store.wifiHighPerformance.first(),
+                    clientKeepaliveSeconds = store.clientKeepaliveSeconds.first()
                 )
                 if (params.peer.isNotEmpty() && params.vkHashes.isNotEmpty()) {
                     launch(Dispatchers.Main) {
@@ -136,7 +140,11 @@ class TunnelService : Service() {
     private fun startTunnel(params: TunnelParams) {
         updateNotification("Подключение...")
         acquireWakeLock()
-        acquireWifiLock()
+        if (params.wifiHighPerformance) {
+            acquireWifiLock()
+        } else {
+            releaseWifiLock()
+        }
 
         // Подготавливаем CaptchaWebViewManager (не создаёт WebView — просто сохраняет контекст)
         // Вызываем всегда — дёшево, а WebView создаётся на лету при каждом запросе капчи
@@ -146,13 +154,13 @@ class TunnelService : Service() {
         startStatsUpdater()
     }
 
-    private fun stopTunnel() {
+    private fun stopTunnel(userRequested: Boolean = false) {
         updateJob?.cancel()
 
         // Уничтожаем текущий WebView (если капча решается) и чистим контекст
         CaptchaWebViewManager.onTunnelStop()
 
-        TunnelManager.stop()
+        TunnelManager.stop(userRequested = userRequested)
         releaseWakeLock()
         releaseWifiLock()
         stopForeground(STOP_FOREGROUND_REMOVE)

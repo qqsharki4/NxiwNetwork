@@ -38,14 +38,15 @@ class NxiwTileService : TileService() {
                 if (peer.isNotBlank() && hashes.isNotBlank()) {
                     val intent = Intent(applicationContext, TunnelService::class.java).apply {
                         action = "START"
-                        putExtra("peer", "$peer:56000")
+                        putExtra("peer", normalizeNodeEndpoint(peer))
                         putExtra("vk_hashes", hashes)
                         putExtra("workers_per_hash", store.workersPerHash.first())
                         putExtra("port", store.listenPort.first())
                         putExtra("protocol", store.protocol.first())
                         putExtra("captcha_mode", store.captchaMode.first())
-                        // ПАРОЛЬ ДОБАВЛЕН ТУТ
                         putExtra("connection_password", store.connectionPassword.first())
+                        putExtra("wifi_high_performance", store.wifiHighPerformance.first())
+                        putExtra("client_keepalive_seconds", store.clientKeepaliveSeconds.first())
                     }
                     if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
                 }

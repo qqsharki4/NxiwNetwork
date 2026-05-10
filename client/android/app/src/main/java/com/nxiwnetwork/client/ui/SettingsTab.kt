@@ -58,6 +58,12 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.nxiwnetwork.client.DEFAULT_NODE_PORT
+import com.nxiwnetwork.client.isValidNodeAddress
+import com.nxiwnetwork.client.nodeEndpointHost
+import com.nxiwnetwork.client.nodeEndpointPort
+import com.nxiwnetwork.client.normalizeNodeAddressForStorage
+import com.nxiwnetwork.client.normalizeNodeEndpoint
 import com.nxiwnetwork.client.SettingsStore
 import com.nxiwnetwork.client.TunnelManager
 import com.nxiwnetwork.client.TunnelService
@@ -126,7 +132,9 @@ fun SettingsTab() {
 
     val peer by settingsStore.peer.collectAsStateWithLifecycle("")
     val hashes by settingsStore.vkHashes.collectAsStateWithLifecycle("")
-    val workers by settingsStore.workersPerHash.collectAsStateWithLifecycle(24)
+    val workers by settingsStore.workersPerHash.collectAsStateWithLifecycle(12)
+    val wifiHighPerformance by settingsStore.wifiHighPerformance.collectAsStateWithLifecycle(true)
+    val clientKeepaliveSeconds by settingsStore.clientKeepaliveSeconds.collectAsStateWithLifecycle(10)
     val port by settingsStore.listenPort.collectAsStateWithLifecycle(9000)
     val sni by settingsStore.sni.collectAsStateWithLifecycle("")
     val connPass by settingsStore.connectionPassword.collectAsStateWithLifecycle("")
@@ -168,7 +176,7 @@ fun SettingsTab() {
 
     val activePeer = peer.trim()
     val activeServer by remember(activePeer) {
-        derivedStateOf { serverList.find { it.ip == activePeer } }
+        derivedStateOf { serverList.find { normalizeNodeEndpoint(it.ip) == normalizeNodeEndpoint(activePeer) } }
     }
 
     var showDiagnosticDialog by remember { mutableStateOf(false) }
@@ -281,7 +289,7 @@ fun SettingsTab() {
                             if (peer.isBlank() || hashes.isBlank()) { Toast.makeText(context, "Выберите ноду и укажите хеши!", Toast.LENGTH_SHORT).show(); return@clickable }
                             val intent = Intent(context, TunnelService::class.java).apply {
                                 action = "START"
-                                putExtra("peer", "${peer.trim()}:56000")
+                                putExtra("peer", normalizeNodeEndpoint(peer))
                                 putExtra("vk_hashes", hashes)
                                 putExtra("workers_per_hash", workers)
                                 putExtra("port", port)
@@ -289,6 +297,8 @@ fun SettingsTab() {
                                 putExtra("connection_password", connPass.trim())
                                 putExtra("protocol", protocol)
                                 putExtra("captcha_mode", captchaModeForMethod(captchaMethod))
+                                putExtra("wifi_high_performance", wifiHighPerformance)
+                                putExtra("client_keepalive_seconds", clientKeepaliveSeconds)
                             }
                             startTunnelWithPermission(intent)
                         }
@@ -498,16 +508,29 @@ fun DiagnosticDialog(context: Context, peer: String, hashes: String, onDismiss: 
         }
         
         withContext(Dispatchers.IO) {
-            val ip = peer.substringBefore(":")
+            val ip = nodeEndpointHost(peer)
+            val nodePort = nodeEndpointPort(peer, DEFAULT_NODE_PORT)
             
             // 1. Доступность интернета (DNS Google)
             val internetOk = try { Socket().use { it.connect(InetSocketAddress("8.8.8.8", 53), 1500) }; true } catch (e: Exception) { false }
             results = results.toMutableList().apply { set(0, internetOk) }; step = 1
 
-            // 2. Доступность ноды (Ping или SSH 22 порт)
-            val serverOk = try {
+            // 2. Доступность ноды (Ping или TCP fallback)
+            val serverOk = if (ip.isBlank()) {
+                false
+            } else try {
                 val process = Runtime.getRuntime().exec("ping -c 1 -W 2 $ip")
-                if (process.waitFor() == 0) true else { Socket().use { it.connect(InetSocketAddress(ip, 22), 1500) }; true }
+                if (process.waitFor() == 0) {
+                    true
+                } else {
+                    try {
+                        Socket().use { it.connect(InetSocketAddress(ip, nodePort), 1500) }
+                        true
+                    } catch (_: Exception) {
+                        Socket().use { it.connect(InetSocketAddress(ip, 22), 1500) }
+                        true
+                    }
+                }
             } catch (e: Exception) { false }
             results = results.toMutableList().apply { set(1, serverOk) }; step = 2
 
@@ -608,6 +631,7 @@ fun AddEditServerDialog(server: NxiwNetworkServer, onDismiss: () -> Unit, onSave
     var ip by remember { mutableStateOf(server.ip) }
     var pass by remember { mutableStateOf(server.password) }
     val isNew = server.name.isBlank()
+    val addressValid = ip.isBlank() || isValidNodeAddress(ip)
     Dialog(onDismissRequest = onDismiss) {
         Surface(shape = RoundedCornerShape(28.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh, tonalElevation = 6.dp) {
             Column(modifier = Modifier.padding(24.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -616,9 +640,27 @@ fun AddEditServerDialog(server: NxiwNetworkServer, onDismiss: () -> Unit, onSave
                     if (!isNew) IconButton(onClick = onDelete) { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) }
                 }
                 OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Имя (напр. Германия)", fontSize = 14.sp) }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp))
-                OutlinedTextField(value = ip, onValueChange = { ip = it.filter { c -> !c.isWhitespace() } }, label = { Text("IP адрес", fontSize = 14.sp) }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp))
+                OutlinedTextField(
+                    value = ip,
+                    onValueChange = { ip = it.filter { c -> !c.isWhitespace() } },
+                    label = { Text("IP адрес", fontSize = 14.sp) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    isError = ip.isNotBlank() && !addressValid,
+                    supportingText = if (ip.isNotBlank() && !addressValid) {
+                        { Text("Проверь адрес ноды") }
+                    } else {
+                        null
+                    }
+                )
                 OutlinedTextField(value = pass, onValueChange = { pass = it.filter { c -> !c.isWhitespace() } }, label = { Text("Пароль от туннеля", fontSize = 14.sp) }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp))
-                Button(onClick = { onSave(server.copy(name = name, ip = ip, password = pass)) }, enabled = name.isNotBlank() && ip.isNotBlank(), modifier = Modifier.fillMaxWidth().height(56.dp), shape = RoundedCornerShape(20.dp)) { Text("Сохранить", fontWeight = FontWeight.Bold, fontSize = 16.sp) }
+                Button(
+                    onClick = { onSave(server.copy(name = name, ip = normalizeNodeAddressForStorage(ip), password = pass)) },
+                    enabled = name.isNotBlank() && ip.isNotBlank() && addressValid,
+                    modifier = Modifier.fillMaxWidth().height(56.dp),
+                    shape = RoundedCornerShape(20.dp)
+                ) { Text("Сохранить", fontWeight = FontWeight.Bold, fontSize = 16.sp) }
             }
         }
     }

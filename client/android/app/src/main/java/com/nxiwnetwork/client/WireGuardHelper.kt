@@ -2,6 +2,7 @@ package com.nxiwnetwork.client
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.VpnService
 import android.util.Log
 import com.wireguard.android.backend.GoBackend
@@ -81,13 +82,46 @@ class WireGuardHelper(context: Context) {
 
             builder.parsePrivateKey(parsedConfig.`interface`.keyPair.privateKey.toBase64())
 
-            val savedExcluded = settingsStore.excludedApps.first()
-            val userSelected = savedExcluded.split(",").filter { it.isNotEmpty() }.toSet()
-            val excluded = mutableSetOf(appContext.packageName, "com.vkontakte.android", "com.vk.calls")
-            excluded.addAll(userSelected)
-            val installedExcluded = excluded.filter { it.isInstalledPackage() }.toSet()
-            if (installedExcluded.isNotEmpty()) {
-                builder.excludeApplications(installedExcluded)
+            val routingEnabled = settingsStore.routingEnabled.first()
+            val isWhitelist = settingsStore.isWhitelist.first()
+            val userSelected = settingsStore.excludedApps.first()
+                .split(",")
+                .filter { it.isNotEmpty() }
+                .toSet()
+            val transportSafeExcluded = setOf(appContext.packageName, "com.vkontakte.android", "com.vk.calls")
+                .filter { it.isInstalledPackage() }
+                .toSet()
+
+            when {
+                !routingEnabled -> {
+                    if (transportSafeExcluded.isNotEmpty()) {
+                        builder.excludeApplications(transportSafeExcluded)
+                    }
+                }
+                isWhitelist -> {
+                    val included = (userSelected - transportSafeExcluded)
+                        .filter { it.isInstalledPackage() }
+                        .toSet()
+                    if (included.isNotEmpty()) {
+                        builder.includeApplications(included)
+                    } else {
+                        val allInstalled = appContext.packageManager
+                            .getInstalledApplications(PackageManager.GET_META_DATA)
+                            .map { it.packageName }
+                            .filter { it.isInstalledPackage() }
+                            .toSet()
+                        if (allInstalled.isNotEmpty()) {
+                            builder.excludeApplications(allInstalled)
+                        }
+                    }
+                }
+                else -> {
+                    val excluded = transportSafeExcluded + userSelected
+                    val installedExcluded = excluded.filter { it.isInstalledPackage() }.toSet()
+                    if (installedExcluded.isNotEmpty()) {
+                        builder.excludeApplications(installedExcluded)
+                    }
+                }
             }
 
             val peerBuilder = Peer.Builder()

@@ -31,8 +31,10 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
@@ -63,6 +65,7 @@ import com.nxiwnetwork.client.ui.LogsTab
 import com.nxiwnetwork.client.ui.SettingsTab
 import com.nxiwnetwork.client.ui.DeployTab
 import com.nxiwnetwork.client.ui.ExceptionsTab
+import com.nxiwnetwork.client.ui.ChangelogDialog
 import com.nxiwnetwork.client.ui.InfoTab
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -72,8 +75,12 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.security.MessageDigest
 import java.util.UUID
 import kotlin.math.absoluteValue
+
+private const val UPDATE_REMIND_LATER_MS = 12L * 60L * 60L * 1000L
+private const val AUTO_UPDATE_CHECK_INTERVAL_MS = 12L * 60L * 60L * 1000L
 
 class MainActivity : ComponentActivity() {
 
@@ -124,6 +131,8 @@ class MainActivity : ComponentActivity() {
         val settingsStore = SettingsStore(this)
         val prefs = getSharedPreferences("nxiwnetwork_prefs", Context.MODE_PRIVATE)
         val isFirstLaunch = prefs.getBoolean("is_first_launch", true)
+        val startupChangelogKey = buildChangelogSeenKey()
+        val startupChangelogChannel = readCurrentAppChannelKey()
 
         handleIntents(intent, settingsStore)
 
@@ -133,9 +142,11 @@ class MainActivity : ComponentActivity() {
                     connectedTime = System.currentTimeMillis()
                     expectedDisconnect = false
                 } else {
-                    if (!expectedDisconnect && connectedTime > 0 && (System.currentTimeMillis() - connectedTime) > 5000) {
+                    val stoppedByUser = TunnelManager.consumeUserRequestedStop()
+                    if (!expectedDisconnect && !stoppedByUser && connectedTime > 0 && (System.currentTimeMillis() - connectedTime) > 5000) {
                         showConnectionDropNotification()
                     }
+                    expectedDisconnect = false
                     connectedTime = 0L
                 }
             }
@@ -145,6 +156,49 @@ class MainActivity : ComponentActivity() {
             val themeMode by settingsStore.themeMode.collectAsStateWithLifecycle("system")
             val dynamicColor by settingsStore.useDynamicColor.collectAsStateWithLifecycle(true)
             var showOnboarding by remember { mutableStateOf(isFirstLaunch) }
+            var showStartupChangelog by remember { mutableStateOf(false) }
+            var pendingUpdate by remember { mutableStateOf<AvailableUpdate?>(null) }
+            var pendingUpdateChannel by remember { mutableStateOf("stable") }
+            var startupUpdateChecked by remember { mutableStateOf(false) }
+
+            LaunchedEffect(showOnboarding) {
+                if (showOnboarding) return@LaunchedEffect
+
+                val lastSeenKey = settingsStore.getStartupChangelogSeenKey(startupChangelogChannel)
+                showStartupChangelog = lastSeenKey != startupChangelogKey
+                if (startupUpdateChecked) return@LaunchedEffect
+                startupUpdateChecked = true
+
+                val normalizedChannel = normalizeUpdateChannelId(settingsStore.updateChannel.first())
+                pendingUpdateChannel = normalizedChannel
+                val now = System.currentTimeMillis()
+                val lastCheckAt = settingsStore.updateLastCheckAt.first()
+                if (lastCheckAt > 0L && now - lastCheckAt < AUTO_UPDATE_CHECK_INTERVAL_MS) {
+                    return@LaunchedEffect
+                }
+
+                val laterUntil = settingsStore.getUpdateLaterUntil(normalizedChannel)
+                if (now < laterUntil) {
+                    return@LaunchedEffect
+                }
+
+                val skippedTag = settingsStore.getSkippedUpdateTag(normalizedChannel).ifBlank { null }
+                val updateResult = runCatching {
+                    ReleaseUpdater.checkForUpdate(this@MainActivity, normalizedChannel, skippedTag)
+                }
+                pendingUpdate = updateResult.getOrNull()
+                updateResult.fold(
+                    onSuccess = { update ->
+                        settingsStore.saveUpdateRateLimitUntil(0L)
+                        settingsStore.saveUpdateCheckStatus(update?.let { "Доступна версия ${it.tagName}" } ?: "Обновлений нет")
+                    },
+                    onFailure = { error ->
+                        (error as? GitHubRateLimitException)
+                            ?.let { settingsStore.saveUpdateRateLimitUntil(it.resetAtMillis ?: fallbackRateLimitUntil()) }
+                        settingsStore.saveUpdateStatus(ReleaseUpdater.describeCheckFailure(error))
+                    }
+                )
+            }
 
             NxiwTheme(themeMode = themeMode, dynamicColor = dynamicColor) {
                 Box(modifier = Modifier.fillMaxSize()) {
@@ -158,6 +212,15 @@ class MainActivity : ComponentActivity() {
                         OnboardingOverlay {
                             showOnboarding = false
                             prefs.edit().putBoolean("is_first_launch", false).apply()
+                        }
+                    }
+
+                    if (showStartupChangelog && pendingImportConfig.value == null) {
+                        ChangelogDialog {
+                            showStartupChangelog = false
+                            lifecycleScope.launch {
+                                settingsStore.saveStartupChangelogSeenKey(startupChangelogChannel, startupChangelogKey)
+                            }
                         }
                     }
 
@@ -178,6 +241,43 @@ class MainActivity : ComponentActivity() {
                             }
                         )
                     }
+
+                    pendingUpdate?.let { update ->
+                        if (!showOnboarding && !showStartupChangelog && pendingImportConfig.value == null) {
+                            UpdateAvailableDialog(
+                                update = update,
+                                onClose = {
+                                    pendingUpdate = null
+                                },
+                                onLater = {
+                                    lifecycleScope.launch {
+                                        settingsStore.saveRemoteChangelogSeenKey(pendingUpdateChannel, buildRemoteChangelogSeenKey(update))
+                                        settingsStore.saveUpdateLaterUntil(
+                                            pendingUpdateChannel,
+                                            System.currentTimeMillis() + UPDATE_REMIND_LATER_MS
+                                        )
+                                        settingsStore.saveUpdateStatus("Обновление ${update.tagName} отложено")
+                                    }
+                                    pendingUpdate = null
+                                },
+                                onSkip = {
+                                    lifecycleScope.launch {
+                                        settingsStore.saveRemoteChangelogSeenKey(pendingUpdateChannel, buildRemoteChangelogSeenKey(update))
+                                        settingsStore.saveSkippedUpdateTag(pendingUpdateChannel, update.tagName)
+                                        settingsStore.saveUpdateStatus("Пропущена версия ${update.tagName}")
+                                    }
+                                    pendingUpdate = null
+                                },
+                                onDownload = {
+                                    lifecycleScope.launch {
+                                        settingsStore.saveRemoteChangelogSeenKey(pendingUpdateChannel, buildRemoteChangelogSeenKey(update))
+                                        downloadAndInstallUpdate(settingsStore, update)
+                                    }
+                                    pendingUpdate = null
+                                }
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -187,6 +287,79 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleIntents(intent, SettingsStore(this))
+    }
+
+    private suspend fun downloadAndInstallUpdate(settingsStore: SettingsStore, update: AvailableUpdate) {
+        if (!ReleaseUpdater.canInstallDownloadedApks(this)) {
+            settingsStore.saveUpdateStatus("Нужно разрешить установку APK")
+            Toast.makeText(this, "Разреши установку APK для NxiwNetwork", Toast.LENGTH_LONG).show()
+            ReleaseUpdater.openInstallPermissionSettings(this)
+            return
+        }
+
+        settingsStore.saveUpdateStatus("Скачиваем ${update.tagName}...")
+        val result = runCatching {
+            val apkFile = ReleaseUpdater.downloadUpdateFile(this, update)
+            ReleaseUpdater.installDownloadedApk(this, apkFile)
+        }
+        settingsStore.saveUpdateStatus(
+            if (result.isSuccess) "Открыт установщик ${update.tagName}" else "Ошибка скачивания ${update.tagName}"
+        )
+        Toast.makeText(
+            this,
+            if (result.isSuccess) "Открываю установку обновления" else "Не удалось скачать обновление",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    private fun readCurrentAppChannelKey(): String {
+        val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            packageManager.getPackageInfo(packageName, PackageManager.PackageInfoFlags.of(0))
+        } else {
+            @Suppress("DEPRECATION")
+            packageManager.getPackageInfo(packageName, 0)
+        }
+        return parseUpdateChannel(packageInfo.versionName ?: "0.0.0").name.lowercase()
+    }
+
+    private fun normalizeUpdateChannelId(channel: String): String {
+        return when (channel.lowercase()) {
+            "pre", "dev" -> channel.lowercase()
+            else -> "stable"
+        }
+    }
+
+    private fun buildRemoteChangelogSeenKey(update: AvailableUpdate): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val hash = digest.digest(update.body.toByteArray()).joinToString("") { "%02x".format(it) }
+        return "${update.tagName}:$hash"
+    }
+
+    private fun buildChangelogSeenKey(): String {
+        val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            packageManager.getPackageInfo(packageName, PackageManager.PackageInfoFlags.of(0))
+        } else {
+            @Suppress("DEPRECATION")
+            packageManager.getPackageInfo(packageName, 0)
+        }
+        val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            packageInfo.longVersionCode
+        } else {
+            @Suppress("DEPRECATION")
+            packageInfo.versionCode.toLong()
+        }
+        val versionName = packageInfo.versionName ?: "unknown"
+        val visibleChangelogHash = runCatching {
+            val changelog = assets.open("CHANGELOG.md").bufferedReader().use { it.readText() }
+            val visibleChangelog = filterChangelogForVersion(changelog, versionName)
+            val digest = MessageDigest.getInstance("SHA-256")
+            digest.digest(visibleChangelog.toByteArray()).joinToString("") { "%02x".format(it) }
+        }.getOrElse { "missing" }
+        return "$versionName:$versionCode:$visibleChangelogHash"
+    }
+
+    private fun fallbackRateLimitUntil(): Long {
+        return System.currentTimeMillis() + 60L * 60L * 1000L
     }
 
     private fun createNotificationChannel() {
@@ -239,13 +412,16 @@ class MainActivity : ComponentActivity() {
                     if (peer.isNotBlank() && hashes.isNotBlank()) {
                         val startIntent = Intent(applicationContext, TunnelService::class.java).apply {
                             action = "START"
-                            putExtra("peer", "$peer:56000")
+                            putExtra("peer", normalizeNodeEndpoint(peer))
                             putExtra("vk_hashes", hashes)
-                            putExtra("workers_per_hash", settingsStore.workersPerHash.first())
-                            putExtra("port", settingsStore.listenPort.first())
-                            putExtra("protocol", settingsStore.protocol.first())
-                            putExtra("captcha_mode", settingsStore.captchaMode.first())
-                        }
+	                            putExtra("workers_per_hash", settingsStore.workersPerHash.first())
+	                            putExtra("port", settingsStore.listenPort.first())
+	                            putExtra("connection_password", settingsStore.connectionPassword.first())
+	                            putExtra("protocol", settingsStore.protocol.first())
+	                            putExtra("captcha_mode", settingsStore.captchaMode.first())
+	                            putExtra("wifi_high_performance", settingsStore.wifiHighPerformance.first())
+	                            putExtra("client_keepalive_seconds", settingsStore.clientKeepaliveSeconds.first())
+	                        }
                         startTunnelServiceWithPermission(startIntent)
                     }
                 }
@@ -312,7 +488,7 @@ class MainActivity : ComponentActivity() {
 
             var existingIndex = -1
             for (index in 0 until currentArray.length()) {
-                if (currentArray.getJSONObject(index).optString("ip").trim() == config.host.trim()) {
+                if (normalizeNodeEndpoint(currentArray.getJSONObject(index).optString("ip").trim()) == normalizeNodeEndpoint(formatNodeAddress(config.host, config.port))) {
                     existingIndex = index
                     break
                 }
@@ -326,7 +502,7 @@ class MainActivity : ComponentActivity() {
             val nodeJson = JSONObject().apply {
                 put("id", id)
                 put("name", config.name.trim())
-                put("ip", config.host.trim())
+                put("ip", formatNodeAddress(config.host, config.port))
                 put("password", config.password.trim())
                 put("port", config.port)
                 put("protocol", config.protocol)
@@ -337,7 +513,7 @@ class MainActivity : ComponentActivity() {
 
             if (select) {
                 settingsStore.save(
-                    peer = config.host.trim(),
+                    peer = formatNodeAddress(config.host, config.port),
                     vkHashes = settingsStore.vkHashes.first(),
                     secondaryVkHash = settingsStore.secondaryVkHash.first(),
                     workersPerHash = settingsStore.workersPerHash.first(),
@@ -367,8 +543,9 @@ private fun parseImportNodeConfig(json: JSONObject): ImportNodeConfig {
         json.optString("peer", "")
     ).firstOrNull { it.isNotBlank() }?.trim().orEmpty()
 
-    val inferredPort = rawHost.substringAfter(":", "").toIntOrNull()
-    val host = rawHost.substringBefore(":").trim()
+    val parsedAddress = parseNodeAddress(rawHost)
+    val inferredPort = parsedAddress?.port
+    val host = parsedAddress?.host?.trim().orEmpty()
     if (host.isBlank()) error("host is blank")
 
     val protocol = json.optString(
@@ -384,6 +561,118 @@ private fun parseImportNodeConfig(json: JSONObject): ImportNodeConfig {
         port = json.optInt("port", inferredPort ?: 56000).coerceIn(1, 65535),
         protocol = protocol
     )
+}
+
+@Composable
+fun UpdateAvailableDialog(
+    update: AvailableUpdate,
+    onClose: () -> Unit,
+    onLater: () -> Unit,
+    onSkip: () -> Unit,
+    onDownload: () -> Unit
+) {
+    Dialog(onDismissRequest = onClose) {
+        Surface(shape = RoundedCornerShape(32.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+            Column(modifier = Modifier.padding(28.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier.size(52.dp).background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.SystemUpdate, null, tint = MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(26.dp))
+                    }
+                    Spacer(Modifier.width(16.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Доступно обновление", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                        Text(update.tagName, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                Spacer(Modifier.height(18.dp))
+
+                Surface(shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerHighest) {
+                    Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+                        Text(update.releaseName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "Будет скачан файл: ${update.asset.name}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            lineHeight = 20.sp
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "Changelog: ${update.changelogAsset?.name ?: "не прикреплен"}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            lineHeight = 20.sp
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(18.dp))
+
+                Text("Что изменилось", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(10.dp))
+                Column(modifier = Modifier.heightIn(max = 280.dp).verticalScroll(rememberScrollState())) {
+                    ReleaseNotesContent(update.body.ifBlank { "- Автор релиза не добавил changelog." })
+                }
+
+                Spacer(Modifier.height(24.dp))
+
+                Button(
+                    onClick = onDownload,
+                    modifier = Modifier.fillMaxWidth().height(56.dp),
+                    shape = RoundedCornerShape(24.dp)
+                ) {
+                    Icon(Icons.Default.Download, null, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Скачать", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                }
+                Spacer(Modifier.height(10.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    TextButton(onClick = onClose, modifier = Modifier.weight(1f)) { Text("Закрыть") }
+                    TextButton(onClick = onLater, modifier = Modifier.weight(1f)) { Text("Позже") }
+                }
+                TextButton(onClick = onSkip, modifier = Modifier.fillMaxWidth()) { Text("Пропустить обновление") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReleaseNotesContent(markdown: String) {
+    markdown.lineSequence().forEach { rawLine ->
+        val line = rawLine.trimEnd()
+        when {
+            line.isBlank() -> Spacer(Modifier.height(6.dp))
+            line.startsWith("#") -> {
+                Text(
+                    line.trimStart('#').trim(),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(top = 6.dp, bottom = 6.dp)
+                )
+            }
+            line.startsWith("- ") || line.startsWith("* ") -> {
+                Text(
+                    "• ${line.drop(2).trim()}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    lineHeight = 20.sp,
+                    modifier = Modifier.padding(bottom = 6.dp)
+                )
+            }
+            else -> {
+                Text(
+                    line,
+                    style = MaterialTheme.typography.bodyMedium,
+                    lineHeight = 20.sp,
+                    modifier = Modifier.padding(bottom = 6.dp)
+                )
+            }
+        }
+    }
 }
 
 @Composable

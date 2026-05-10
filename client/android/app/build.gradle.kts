@@ -1,4 +1,18 @@
+import com.android.build.VariantOutput
+import com.android.build.gradle.api.ApkVariantOutput
+import java.io.File
 import java.util.Properties
+
+val releaseKeystorePropertiesFile = rootProject.file("keystore.properties")
+val releaseKeystoreProperties = Properties().apply {
+    if (releaseKeystorePropertiesFile.isFile) {
+        releaseKeystorePropertiesFile.inputStream().use(::load)
+    }
+}
+
+fun releaseSigningValue(envName: String, propertyName: String): String? {
+    return System.getenv(envName) ?: releaseKeystoreProperties.getProperty(propertyName)
+}
 
 plugins {
     id("com.android.application")
@@ -15,7 +29,7 @@ android {
         minSdk = 29
         targetSdk = 34
         versionCode = 1
-        versionName = "1.1.0"
+        versionName = "1.1.0-dev.1"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
@@ -32,6 +46,30 @@ android {
         }
     }
 
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("armeabi-v7a", "arm64-v8a")
+            isUniversalApk = true
+        }
+    }
+
+    signingConfigs {
+        create("release") {
+            val storeFilePath = releaseSigningValue("NXIW_RELEASE_STORE_FILE", "storeFile")
+                ?: throw GradleException("Missing NXIW_RELEASE_STORE_FILE or storeFile in ${releaseKeystorePropertiesFile.absolutePath}")
+            val resolvedStoreFile = File(storeFilePath)
+            storeFile = if (resolvedStoreFile.isAbsolute) resolvedStoreFile else rootProject.file(storeFilePath)
+            storePassword = releaseSigningValue("NXIW_RELEASE_STORE_PASSWORD", "storePassword")
+                ?: throw GradleException("Missing NXIW_RELEASE_STORE_PASSWORD or storePassword in ${releaseKeystorePropertiesFile.absolutePath}")
+            keyAlias = releaseSigningValue("NXIW_RELEASE_KEY_ALIAS", "keyAlias")
+                ?: throw GradleException("Missing NXIW_RELEASE_KEY_ALIAS or keyAlias in ${releaseKeystorePropertiesFile.absolutePath}")
+            keyPassword = releaseSigningValue("NXIW_RELEASE_KEY_PASSWORD", "keyPassword")
+                ?: throw GradleException("Missing NXIW_RELEASE_KEY_PASSWORD or keyPassword in ${releaseKeystorePropertiesFile.absolutePath}")
+        }
+    }
+
     buildTypes {
         getByName("release") {
             isMinifyEnabled = true
@@ -40,7 +78,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 
@@ -65,6 +103,16 @@ android {
 
     kotlinOptions {
         jvmTarget = "17"
+    }
+
+    applicationVariants.all {
+        if (buildType.name == "release") {
+            val releaseVersionName = versionName
+            outputs.all {
+                val abi = filters.find { it.filterType == VariantOutput.ABI }?.identifier ?: "universal"
+                (this as ApkVariantOutput).outputFileName = "NxiwNetwork-v$releaseVersionName-$abi.apk"
+            }
+        }
     }
 }
 
@@ -147,6 +195,7 @@ dependencies {
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
+    implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.6")
     implementation("androidx.datastore:datastore-preferences:1.1.1")

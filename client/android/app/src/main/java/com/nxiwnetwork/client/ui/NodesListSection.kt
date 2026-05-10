@@ -46,6 +46,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nxiwnetwork.client.SettingsStore
+import com.nxiwnetwork.client.normalizeNodeEndpoint
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
@@ -61,7 +62,7 @@ fun NodesListSection(modifier: Modifier = Modifier) {
     val peer by settingsStore.peer.collectAsStateWithLifecycle("")
     val hashes by settingsStore.vkHashes.collectAsStateWithLifecycle("")
     val secondaryHash by settingsStore.secondaryVkHash.collectAsStateWithLifecycle("")
-    val workers by settingsStore.workersPerHash.collectAsStateWithLifecycle(16)
+    val workers by settingsStore.workersPerHash.collectAsStateWithLifecycle(12)
     val protocol by settingsStore.protocol.collectAsStateWithLifecycle("udp")
     val port by settingsStore.listenPort.collectAsStateWithLifecycle(9000)
     val sni by settingsStore.sni.collectAsStateWithLifecycle("")
@@ -138,7 +139,7 @@ fun NodesListSection(modifier: Modifier = Modifier) {
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     items(serverList, key = { it.id }) { server ->
-                        val isSelected = peer.trim() == server.ip.trim()
+                        val isSelected = normalizeNodeEndpoint(peer) == normalizeNodeEndpoint(server.ip)
                         NodeListItem(
                             server = server,
                             selected = isSelected,
@@ -186,7 +187,7 @@ fun NodesListSection(modifier: Modifier = Modifier) {
             onDismiss = { serverToEdit = null },
             onSave = { updated ->
                 val existingIndex = serverList.indexOfFirst { it.id == updated.id }
-                val wasSelected = peer.trim() == editedServer.ip.trim()
+                val wasSelected = normalizeNodeEndpoint(peer) == normalizeNodeEndpoint(editedServer.ip)
                 if (existingIndex == -1) {
                     serverList.add(updated)
                 } else {
@@ -212,7 +213,7 @@ fun NodesListSection(modifier: Modifier = Modifier) {
             onDelete = {
                 serverList.removeAll { it.id == editedServer.id }
                 saveServers()
-                if (peer.trim() == editedServer.ip.trim()) {
+                if (normalizeNodeEndpoint(peer) == normalizeNodeEndpoint(editedServer.ip)) {
                     scope.launch {
                         settingsStore.save("", hashes, secondaryHash, workers, protocol, port, sni)
                         settingsStore.saveConnectionPassword("")

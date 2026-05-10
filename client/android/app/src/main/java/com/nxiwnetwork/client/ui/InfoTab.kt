@@ -1,15 +1,19 @@
 package com.nxiwnetwork.client.ui
 
-import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
-import android.util.Base64
+import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -28,26 +32,316 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.nxiwnetwork.client.AvailableUpdate
+import com.nxiwnetwork.client.GitHubRateLimitException
+import com.nxiwnetwork.client.ReleaseUpdater
+import com.nxiwnetwork.client.filterChangelogForVersion
 import com.nxiwnetwork.client.SettingsStore
 import com.nxiwnetwork.client.TunnelManager
+import com.nxiwnetwork.client.UpdateAvailableDialog
+import com.nxiwnetwork.client.UpdateCheckCoordinator
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.security.MessageDigest
 import java.util.UUID
 import kotlin.math.roundToInt
+
+private const val UPDATE_REMIND_LATER_MS = 12L * 60L * 60L * 1000L
+private const val VK_HASH_ROW_ANIMATION_MS = 300
+private const val VK_HASH_TRASH_ANIMATION_MS = 320
+private val VK_JOIN_LINK_REGEX = Regex(
+    pattern = """(?i)(?:https?://)?(?:[a-z0-9-]+\.)?vk\.(?:ru|com)/call/join/([^/?#\s,;]+)"""
+)
+
+private data class VkHashFieldUi(
+    val id: Long,
+    val value: String
+)
+
+private enum class VkHashSlotType {
+    Hidden,
+    AddButton,
+    Field
+}
+
+private data class VkHashSlotUi(
+    val slotIndex: Int,
+    val type: VkHashSlotType,
+    val fieldId: Long? = null,
+    val value: String = "",
+    val labelIndex: Int = 0
+) {
+    val contentKey: String get() = "$slotIndex:$type"
+}
+
+private fun normalizeVkHashInput(input: String): String {
+    val trimmed = input.trim().trim(',', ';')
+    return VK_JOIN_LINK_REGEX.find(trimmed)
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.trim()
+        ?.trimEnd('/')
+        ?: trimmed
+}
+
+private fun normalizeVkHashList(input: String): String {
+    return input
+        .split(",")
+        .map { normalizeVkHashInput(it) }
+        .filter { it.isNotEmpty() }
+        .joinToString(",")
+}
+
+private fun normalizeVkHashFieldEdit(input: String): String {
+    return if (VK_JOIN_LINK_REGEX.containsMatchIn(input)) normalizeVkHashInput(input) else input
+}
+
+private fun buildVkHashSlots(fields: List<VkHashFieldUi>): List<VkHashSlotUi> {
+    val visibleFields = fields.take(3)
+    val firstField = visibleFields.getOrNull(0)
+    val secondField = visibleFields.getOrNull(1)
+    val thirdField = visibleFields.getOrNull(2)
+
+    return listOf(
+        if (firstField != null) {
+            VkHashSlotUi(
+                slotIndex = 0,
+                type = VkHashSlotType.Field,
+                fieldId = firstField.id,
+                value = firstField.value,
+                labelIndex = 1
+            )
+        } else {
+            VkHashSlotUi(slotIndex = 0, type = VkHashSlotType.Hidden)
+        },
+        if (secondField != null) {
+            VkHashSlotUi(
+                slotIndex = 1,
+                type = VkHashSlotType.Field,
+                fieldId = secondField.id,
+                value = secondField.value,
+                labelIndex = 2
+            )
+        } else {
+            VkHashSlotUi(slotIndex = 1, type = VkHashSlotType.AddButton)
+        },
+        when {
+            thirdField != null -> VkHashSlotUi(
+                slotIndex = 2,
+                type = VkHashSlotType.Field,
+                fieldId = thirdField.id,
+                value = thirdField.value,
+                labelIndex = 3
+            )
+            secondField != null -> VkHashSlotUi(slotIndex = 2, type = VkHashSlotType.AddButton)
+            else -> VkHashSlotUi(slotIndex = 2, type = VkHashSlotType.Hidden)
+        }
+    )
+}
+
+@Composable
+private fun VkHashDeleteSlot(
+    slotWidth: Dp,
+    visible: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier.width(slotWidth).clipToBounds(),
+        contentAlignment = Alignment.CenterEnd
+    ) {
+        AnimatedVisibility(
+            visible = visible,
+            enter = fadeIn(
+                tween(210, delayMillis = 80, easing = FastOutSlowInEasing)
+            ) + scaleIn(
+                tween(250, delayMillis = 40, easing = FastOutSlowInEasing),
+                initialScale = 0.9f
+            ),
+            exit = fadeOut(
+                tween(140, easing = FastOutSlowInEasing)
+            ) + scaleOut(
+                tween(160, easing = FastOutSlowInEasing),
+                targetScale = 0.9f
+            )
+        ) {
+            IconButton(
+                enabled = enabled,
+                onClick = onClick
+            ) {
+                Icon(Icons.Default.DeleteOutline, null, tint = MaterialTheme.colorScheme.error)
+            }
+        }
+    }
+}
+
+@Composable
+private fun VkHashSlotContent(
+    slot: VkHashSlotUi,
+    fieldCount: Int,
+    canAddHashField: Boolean,
+    canEditHashFields: Boolean,
+    onValueChange: (Long, String) -> Unit,
+    onRemove: (Long) -> Unit,
+    onAdd: () -> Unit
+) {
+    if (slot.type == VkHashSlotType.Hidden) {
+        Spacer(Modifier.height(0.dp))
+        return
+    }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        if (slot.slotIndex > 0) {
+            Spacer(Modifier.height(12.dp))
+        }
+
+        when (slot.type) {
+            VkHashSlotType.Field -> VkHashFieldRow(
+                slot = slot,
+                fieldCount = fieldCount,
+                onValueChange = onValueChange,
+                onRemove = onRemove
+            )
+            VkHashSlotType.AddButton -> VkHashAddButton(
+                enabled = canAddHashField && canEditHashFields,
+                onClick = onAdd
+            )
+            VkHashSlotType.Hidden -> Unit
+        }
+    }
+}
+
+@Composable
+private fun VkHashFieldRow(
+    slot: VkHashSlotUi,
+    fieldCount: Int,
+    onValueChange: (Long, String) -> Unit,
+    onRemove: (Long) -> Unit
+) {
+    val fieldId = slot.fieldId ?: return
+    val showDeleteButton = fieldCount > 1
+    val deleteSlotWidth by animateDpAsState(
+        targetValue = if (showDeleteButton) 56.dp else 0.dp,
+        animationSpec = tween(VK_HASH_TRASH_ANIMATION_MS, easing = FastOutSlowInEasing),
+        label = "vk_hash_delete_slot"
+    )
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        OutlinedTextField(
+            value = slot.value,
+            onValueChange = { value -> onValueChange(fieldId, normalizeVkHashFieldEdit(value)) },
+            label = { Text("Ключ ${slot.labelIndex}") },
+            modifier = Modifier.weight(1f),
+            shape = RoundedCornerShape(20.dp),
+            singleLine = true
+        )
+        VkHashDeleteSlot(
+            slotWidth = deleteSlotWidth,
+            visible = showDeleteButton,
+            enabled = true,
+            onClick = { onRemove(fieldId) }
+        )
+    }
+}
+
+@Composable
+private fun VkHashAddButton(
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    val shape = RoundedCornerShape(16.dp)
+    val containerColor by animateColorAsState(
+        targetValue = if (enabled) {
+            MaterialTheme.colorScheme.secondaryContainer
+        } else {
+            MaterialTheme.colorScheme.surfaceContainerHighest
+        },
+        animationSpec = tween(260, easing = FastOutSlowInEasing),
+        label = "vk_hash_add_container"
+    )
+    val contentColor by animateColorAsState(
+        targetValue = if (enabled) {
+            MaterialTheme.colorScheme.onSecondaryContainer
+        } else {
+            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.58f)
+        },
+        animationSpec = tween(240, easing = FastOutSlowInEasing),
+        label = "vk_hash_add_content"
+    )
+    val tonalElevation by animateDpAsState(
+        targetValue = if (enabled) 2.dp else 0.dp,
+        animationSpec = tween(260, easing = FastOutSlowInEasing),
+        label = "vk_hash_add_elevation"
+    )
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(52.dp)
+            .clip(shape)
+            .clickable(
+                enabled = enabled,
+                role = Role.Button,
+                onClick = onClick
+            ),
+        shape = shape,
+        color = containerColor,
+        contentColor = contentColor,
+        tonalElevation = tonalElevation
+    ) {
+        Row(
+            modifier = Modifier.fillMaxSize(),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(Icons.Default.Add, null, Modifier.size(20.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Добавить ключ", fontWeight = FontWeight.Medium)
+        }
+    }
+}
+
+@Composable
+private fun SegmentedSelectionIcon(
+    selected: Boolean,
+    animate: Boolean
+) {
+    if (animate) {
+        AnimatedVisibility(
+            visible = selected,
+            enter = fadeIn(tween(140, easing = FastOutSlowInEasing)) +
+                scaleIn(tween(170, easing = FastOutSlowInEasing), initialScale = 0.86f),
+            exit = fadeOut(tween(90, easing = FastOutSlowInEasing)) +
+                scaleOut(tween(120, easing = FastOutSlowInEasing), targetScale = 0.86f)
+        ) {
+            Icon(Icons.Default.Check, null, Modifier.size(18.dp))
+        }
+    } else if (selected) {
+        Icon(Icons.Default.Check, null, Modifier.size(18.dp))
+    }
+}
 
 @Composable
 fun InfoTab() {
@@ -73,6 +367,7 @@ fun InfoTab() {
                 "network" -> NetworkSettings { currentScreen = "main" }
                 "performance" -> PerformanceSettings { currentScreen = "main" }
                 "interface" -> InterfaceSettings { currentScreen = "main" }
+                "updates" -> UpdatesSettings { currentScreen = "main" }
             }
         }
     }
@@ -81,9 +376,7 @@ fun InfoTab() {
 @Composable
 fun MainSettingsMenu(onNavigate: (String) -> Unit) {
     val context = LocalContext.current
-    val settingsStore = remember { SettingsStore(context) }
-    val scope = rememberCoroutineScope()
-    val currentPeer by settingsStore.peer.collectAsStateWithLifecycle("")
+    val appVersionName = remember(context) { readAppVersionName(context) }
     var showImportantInfoDialog by remember { mutableStateOf(false) }
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -92,64 +385,387 @@ fun MainSettingsMenu(onNavigate: (String) -> Unit) {
         MenuCategoryItem("Сеть", "Протокол, MTU, DNS", Icons.Default.Language) { onNavigate("network") }
         MenuCategoryItem("Производительность", "Ключи, Потоки, Капча", Icons.Default.Speed) { onNavigate("performance") }
         MenuCategoryItem("Интерфейс", "Темы, Цвета, Отклик", Icons.Default.Palette) { onNavigate("interface") }
-        
-        CategoryCard("Синхронизация", Icons.Default.Share) {
-            Text("Импорт запустит настройку по ссылке из буфера обмена.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 16.dp))
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Button(
-                    modifier = Modifier.weight(1f).height(56.dp), shape = RoundedCornerShape(20.dp),
-                    onClick = {
-                        val cb = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        val text = cb.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
-                        if (text.contains("nxiwnetwork://config?data=")) {
-                            try {
-                                val json = JSONObject(String(Base64.decode(text.substringAfter("data="), Base64.URL_SAFE)))
-                                scope.launch { addServerToStoreDirect(context, settingsStore, json) }
-                            } catch (e: Exception) { Toast.makeText(context, "Ошибка чтения ссылки", Toast.LENGTH_SHORT).show() }
-                        } else Toast.makeText(context, "Ссылка не найдена в буфере", Toast.LENGTH_SHORT).show()
-                    }
-                ) {
-                    Icon(Icons.Default.ContentPasteGo, null); Spacer(Modifier.width(8.dp)); Text("Импорт", fontSize = 16.sp)
-                }
 
-                FilledTonalButton(
-                    modifier = Modifier.weight(1f).height(56.dp), shape = RoundedCornerShape(20.dp),
-                    onClick = {
-                        scope.launch {
-                            val serversJson = settingsStore.savedServersJson.first()
-                            if (currentPeer.isBlank() || serversJson.isBlank()) { 
-                                Toast.makeText(context, "Сначала выберите сервер на главном экране", Toast.LENGTH_SHORT).show(); return@launch 
-                            }
-                            val servers = JSONArray(serversJson)
-                            var activeObj: JSONObject? = null
-                            for (i in 0 until servers.length()) { if (servers.getJSONObject(i).optString("ip") == currentPeer) { activeObj = servers.getJSONObject(i); break } }
-                            if (activeObj == null) { Toast.makeText(context, "Активный сервер не найден", Toast.LENGTH_SHORT).show(); return@launch }
-                            
-                            val b64 = Base64.encodeToString(activeObj.toString().toByteArray(), Base64.URL_SAFE or Base64.NO_WRAP)
-                            context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, "Конфигурация NxiwNetwork:\n\nnxiwnetwork://config?data=$b64") }, "Поделиться конфигурацией"))
-                        }
-                    }
-                ) {
-                    Icon(Icons.Default.IosShare, null); Spacer(Modifier.width(8.dp)); Text("Экспорт", fontSize = 16.sp)
-                }
-            }
-        }
         CategoryCard("О приложении", Icons.Default.Info) {
             SettingClickRow(Icons.Default.HelpOutline, "Важная информация", "Справка по работе приложения") { showImportantInfoDialog = true }
             Divider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-            SettingClickRow(Icons.Default.Code, "GitHub (Форк)", "Исходный код этого приложения") { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/yzewe/NxiwNetwork"))) }
+            SettingClickRow(Icons.Default.SystemUpdate, "Обновления", "Канал обновлений") { onNavigate("updates") }
             Divider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-            SettingClickRow(Icons.Default.CodeOff, "GitHub (Оригинал)", "Оригинальный репозиторий проекта") { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/amurcanov/proxy-turn-vk-android"))) }
+            SettingClickRow(Icons.Default.Code, "GitHub", "Исходный код") { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/qqsharki4/NxiwNetwork"))) }
         }
         
-        Column(modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 32.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            Text("Версия 1.0.6 (Stable)", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.outline, fontSize = 14.sp)
-            FilledTonalButton(onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://yzewe.ru"))) }, shape = RoundedCornerShape(16.dp)) {
-                Text("Форк от yzewe", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-            }
+        Column(modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("Версия $appVersionName", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.outline, fontSize = 14.sp)
         }
     }
     if (showImportantInfoDialog) ImportantInfoDialog { showImportantInfoDialog = false }
+}
+
+private fun normalizeUpdateChannel(channel: String): String {
+    return when (channel.lowercase()) {
+        "pre", "dev" -> channel.lowercase()
+        else -> "stable"
+    }
+}
+
+private fun readAppVersionName(context: Context): String {
+    return try {
+        val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.packageManager.getPackageInfo(
+                context.packageName,
+                PackageManager.PackageInfoFlags.of(0)
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            context.packageManager.getPackageInfo(context.packageName, 0)
+        }
+        packageInfo.versionName ?: "неизвестна"
+    } catch (_: Exception) {
+        "неизвестна"
+    }
+}
+
+private fun readAssetText(context: Context, fileName: String): String {
+    return runCatching {
+        context.assets.open(fileName).bufferedReader().use { it.readText() }
+    }.getOrElse {
+        "Не удалось открыть $fileName"
+    }
+}
+
+private fun formatUpdateCheckTime(lastCheckAtMillis: Long, nowMillis: Long): String {
+    if (lastCheckAtMillis <= 0L) return "Последняя проверка: никогда"
+    val elapsedMillis = (nowMillis - lastCheckAtMillis).coerceAtLeast(0L)
+    if (elapsedMillis <= 20_000L) return "Последняя проверка: только что"
+    if (elapsedMillis < 60_000L) return "Последняя проверка: меньше минуты назад"
+
+    val elapsedMinutes = elapsedMillis / 60_000L
+
+    val days = elapsedMinutes / (24L * 60L)
+    val hours = (elapsedMinutes % (24L * 60L)) / 60L
+    val minutes = elapsedMinutes % 60L
+    val parts = buildList {
+        if (days > 0L) add("$days ${pluralRu(days, "день", "дня", "дней")}")
+        if (hours > 0L) add("$hours ${pluralRu(hours, "час", "часа", "часов")}")
+        if (minutes > 0L) add("$minutes ${pluralRu(minutes, "минуту", "минуты", "минут")}")
+    }
+    val relativeTime = parts.joinToString(" ")
+    return "Последняя проверка: $relativeTime назад"
+}
+
+private fun formatRateLimitAlert(rateLimitUntilMillis: Long, nowMillis: Long): String? {
+    if (rateLimitUntilMillis <= nowMillis) return null
+    val remainingMinutes = (((rateLimitUntilMillis - nowMillis).coerceAtLeast(0L)) + 59_999L) / 60_000L
+    return "GitHub ограничил проверки на ${formatDurationMinutes(remainingMinutes)}."
+}
+
+private fun formatDurationMinutes(totalMinutes: Long): String {
+    val minutesValue = totalMinutes.coerceAtLeast(1L)
+    if (minutesValue < 60L) return "$minutesValue ${pluralRu(minutesValue, "минуту", "минуты", "минут")}"
+
+    val hours = minutesValue / 60L
+    val minutes = minutesValue % 60L
+    return buildList {
+        add("$hours ${pluralRu(hours, "час", "часа", "часов")}")
+        if (minutes > 0L) add("$minutes ${pluralRu(minutes, "минуту", "минуты", "минут")}")
+    }.joinToString(" ")
+}
+
+private fun pluralRu(value: Long, one: String, few: String, many: String): String {
+    val lastTwoDigits = value % 100L
+    if (lastTwoDigits in 11L..14L) return many
+
+    return when (value % 10L) {
+        1L -> one
+        2L, 3L, 4L -> few
+        else -> many
+    }
+}
+
+private fun buildRemoteChangelogSeenKey(update: AvailableUpdate): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    val hash = digest.digest(update.body.toByteArray()).joinToString("") { "%02x".format(it) }
+    return "${update.tagName}:$hash"
+}
+
+private suspend fun downloadAndInstallUpdate(
+    context: Context,
+    settingsStore: SettingsStore,
+    channel: String,
+    update: AvailableUpdate
+) {
+    if (!ReleaseUpdater.canInstallDownloadedApks(context)) {
+        settingsStore.saveUpdateStatus("Нужно разрешить установку APK")
+        withContext(Dispatchers.Main) {
+            Toast.makeText(context, "Разреши установку APK для NxiwNetwork", Toast.LENGTH_LONG).show()
+            ReleaseUpdater.openInstallPermissionSettings(context)
+        }
+        return
+    }
+
+    settingsStore.saveUpdateStatus("Скачиваем ${update.tagName}...")
+    val result = runCatching {
+        val apkFile = ReleaseUpdater.downloadUpdateFile(context, update)
+        withContext(Dispatchers.Main) {
+            ReleaseUpdater.installDownloadedApk(context, apkFile)
+        }
+    }
+
+    settingsStore.saveUpdateStatus(
+        if (result.isSuccess) "Открыт установщик ${update.tagName}" else "Ошибка скачивания ${update.tagName}"
+    )
+    if (result.isSuccess) {
+        settingsStore.saveUpdateLaterUntil(channel, 0L)
+        settingsStore.saveSkippedUpdateTag(channel, "")
+    }
+
+    withContext(Dispatchers.Main) {
+        Toast.makeText(
+            context,
+            if (result.isSuccess) "Открываю установку обновления" else "Не удалось скачать обновление",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun UpdatesSettings(onBack: () -> Unit) {
+    val context = LocalContext.current
+    val settingsStore = remember(context) { SettingsStore(context) }
+    val scope = rememberCoroutineScope()
+    val haptic = LocalHapticFeedback.current
+    val selectedChannel by settingsStore.updateChannel.collectAsStateWithLifecycle("stable")
+    val updateStatus by settingsStore.updateLastStatus.collectAsStateWithLifecycle("Обновления еще не проверялись")
+    val updateLastCheckAt by settingsStore.updateLastCheckAt.collectAsStateWithLifecycle(0L)
+    val updateRateLimitUntil by settingsStore.updateRateLimitUntil.collectAsStateWithLifecycle(0L)
+    val checkingUpdates by UpdateCheckCoordinator.isChecking.collectAsStateWithLifecycle()
+    val availableUpdate by UpdateCheckCoordinator.availableUpdate.collectAsStateWithLifecycle()
+    val selected = normalizeUpdateChannel(selectedChannel)
+    var showChangelogDialog by remember { mutableStateOf(false) }
+    var dialogUpdate by remember { mutableStateOf<AvailableUpdate?>(null) }
+    var dismissedDialogTag by remember { mutableStateOf<String?>(null) }
+    var nowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    val rateLimitAlert = formatRateLimitAlert(updateRateLimitUntil, nowMillis)
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            nowMillis = System.currentTimeMillis()
+            delay(1000L)
+        }
+    }
+
+    LaunchedEffect(availableUpdate?.tagName) {
+        val update = availableUpdate
+        if (update == null) {
+            dialogUpdate = null
+        } else if (dismissedDialogTag != update.tagName) {
+            dialogUpdate = update
+        }
+    }
+
+    Column(
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        SettingsHeader("Обновления", onBack)
+
+        CategoryCard("Канал обновлений", Icons.Default.SystemUpdate) {
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                listOf("stable" to "Stable", "pre" to "Pre", "dev" to "Dev").forEachIndexed { index, (value, label) ->
+                    SegmentedButton(
+                        selected = selected == value,
+                        shape = SegmentedButtonDefaults.itemShape(index = index, count = 3),
+                        onClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            scope.launch { settingsStore.saveUpdateChannel(value) }
+                        }
+                    ) {
+                        Text(label, fontSize = 13.sp, maxLines = 1)
+                    }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            AnimatedVisibility(visible = selected != "dev") {
+                AnimatedContent(targetState = selected, label = "update_channel_description") { channel ->
+                    Text(
+                        updateChannelDescription(channel),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        lineHeight = 20.sp
+                    )
+                }
+            }
+            AnimatedVisibility(visible = selected == "dev") {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.WarningAmber, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "Dev ветка может часто ломаться, обновляться слишком часто и содержать незавершенные изменения.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 13.sp
+                    )
+                }
+            }
+        }
+
+        CategoryCard("Проверка обновлений", Icons.Default.Update) {
+            Text(
+                formatUpdateCheckTime(updateLastCheckAt, nowMillis),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp, bottom = 16.dp),
+                fontSize = 14.sp
+            )
+            AnimatedVisibility(visible = rateLimitAlert != null) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.WarningAmber, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        rateLimitAlert.orEmpty(),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 13.sp
+                    )
+                }
+            }
+            Button(
+                onClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    dismissedDialogTag = null
+                    UpdateCheckCoordinator.clearAvailableUpdate()
+                    UpdateCheckCoordinator.requestManualCheck(context, settingsStore, selected)
+                },
+                modifier = Modifier.fillMaxWidth().height(54.dp),
+                shape = RoundedCornerShape(22.dp)
+            ) {
+                if (checkingUpdates) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary
+                    )
+                } else {
+                    Icon(Icons.Default.Search, null, modifier = Modifier.size(20.dp))
+                }
+                Spacer(Modifier.width(8.dp))
+                Text("Проверить обновления", fontWeight = FontWeight.Bold)
+            }
+        }
+
+        CategoryCard("Доступные обновления", Icons.Default.NewReleases) {
+            AnimatedContent(
+                targetState = when {
+                    checkingUpdates -> "checking"
+                    availableUpdate != null -> "available"
+                    updateStatus == "Обновлений нет" -> "none"
+                    else -> "idle"
+                },
+                label = "available_updates_state"
+            ) { state ->
+                when (state) {
+                    "checking" -> Column {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        Spacer(Modifier.height(12.dp))
+                        Text(
+                            "Ищем свежие обновления.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    "available" -> availableUpdate?.let { update ->
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(update.tagName, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                            Text(update.releaseName, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold)
+                            Text(
+                                "APK: ${update.asset.name}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                "Changelog: ${update.changelogAsset?.name ?: "не прикреплен"}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            FilledTonalButton(
+                                onClick = {
+                                    dismissedDialogTag = null
+                                    dialogUpdate = update
+                                },
+                                modifier = Modifier.fillMaxWidth().height(48.dp),
+                                shape = RoundedCornerShape(18.dp)
+                            ) {
+                                Icon(Icons.Default.Article, null, modifier = Modifier.size(20.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text("Открыть обновление", fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                    "none" -> Text(
+                        "Нет доступных обновлений.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    else -> Text(
+                        "Нет доступных обновлений.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
+        CategoryCard("История изменений", Icons.Default.History) {
+            SettingClickRow(Icons.Default.History, "Changelog", "История изменений текущей ветки") { showChangelogDialog = true }
+        }
+    }
+
+    if (showChangelogDialog) ChangelogDialog { showChangelogDialog = false }
+    dialogUpdate?.let { update ->
+        UpdateAvailableDialog(
+            update = update,
+            onClose = {
+                dismissedDialogTag = update.tagName
+                dialogUpdate = null
+            },
+            onLater = {
+                scope.launch {
+                    settingsStore.saveRemoteChangelogSeenKey(selected, buildRemoteChangelogSeenKey(update))
+                    settingsStore.saveUpdateLaterUntil(selected, System.currentTimeMillis() + UPDATE_REMIND_LATER_MS)
+                    settingsStore.saveUpdateStatus("Обновление ${update.tagName} отложено")
+                }
+                UpdateCheckCoordinator.clearAvailableUpdate()
+                dismissedDialogTag = update.tagName
+                dialogUpdate = null
+            },
+            onSkip = {
+                scope.launch {
+                    settingsStore.saveRemoteChangelogSeenKey(selected, buildRemoteChangelogSeenKey(update))
+                    settingsStore.saveSkippedUpdateTag(selected, update.tagName)
+                    settingsStore.saveUpdateStatus("Пропущена версия ${update.tagName}")
+                }
+                UpdateCheckCoordinator.clearAvailableUpdate()
+                dismissedDialogTag = update.tagName
+                dialogUpdate = null
+            },
+            onDownload = {
+                scope.launch {
+                    settingsStore.saveRemoteChangelogSeenKey(selected, buildRemoteChangelogSeenKey(update))
+                    downloadAndInstallUpdate(context, settingsStore, selected, update)
+                }
+                UpdateCheckCoordinator.clearAvailableUpdate()
+                dismissedDialogTag = update.tagName
+                dialogUpdate = null
+            }
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -160,27 +776,43 @@ fun NetworkSettings(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
 
-    val protocol by settingsStore.protocol.collectAsStateWithLifecycle("udp")
+    var protocol by remember { mutableStateOf<String?>(null) }
     val customMtu by settingsStore.customMtu.collectAsStateWithLifecycle(0)
-    val dnsType by settingsStore.customDns.collectAsStateWithLifecycle("default")
+    var dnsType by remember { mutableStateOf<String?>(null) }
     val customDnsIp by settingsStore.customDnsIp.collectAsStateWithLifecycle("1.1.1.1")
-    val currentPeer by settingsStore.peer.collectAsStateWithLifecycle("")
-    val currentHashes by settingsStore.vkHashes.collectAsStateWithLifecycle("")
-    val workersCount by settingsStore.workersPerHash.collectAsStateWithLifecycle(24)
 
     var lastMtu by remember(customMtu) { mutableIntStateOf(customMtu) }
+    var animateProtocolSelection by remember { mutableStateOf(false) }
+    var animateDnsSelection by remember { mutableStateOf(false) }
+
+    LaunchedEffect(settingsStore) {
+        settingsStore.protocol.collect { protocol = it }
+    }
+
+    LaunchedEffect(settingsStore) {
+        settingsStore.customDns.collect { dnsType = it }
+    }
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         SettingsHeader("Сеть", onBack)
         CategoryCard("Транспорт", Icons.Default.CompareArrows) {
             Text("Сетевой протокол", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, fontSize = 16.sp)
             Spacer(Modifier.height(12.dp))
-            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                listOf("udp" to "UDP", "tcp" to "TCP").forEachIndexed { i, (v, l) ->
-                    SegmentedButton(
-                        selected = protocol == v, shape = SegmentedButtonDefaults.itemShape(index = i, count = 2),
-                        onClick = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); scope.launch { settingsStore.save(currentPeer, currentHashes, "", workersCount, v, 9000, "") } }
-                    ) { Text(l, fontSize = 14.sp) }
+            protocol?.let { currentProtocol ->
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                    listOf("udp" to "UDP", "tcp" to "TCP").forEachIndexed { i, (v, l) ->
+                        val selected = currentProtocol == v
+                        SegmentedButton(
+                            selected = selected,
+                            shape = SegmentedButtonDefaults.itemShape(index = i, count = 2),
+                            icon = { SegmentedSelectionIcon(selected, animateProtocolSelection) },
+                            onClick = {
+                                if (currentProtocol != v) animateProtocolSelection = true
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                scope.launch { settingsStore.saveProtocol(v) }
+                            }
+                        ) { Text(l, fontSize = 14.sp) }
+                    }
                 }
             }
             Divider(modifier = Modifier.padding(vertical = 16.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
@@ -200,25 +832,54 @@ fun NetworkSettings(onBack: () -> Unit) {
             Text("Меньшее значение может помочь при плохой связи. Оптимально: 1280-1420.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
         }
         CategoryCard("DNS Сервер", Icons.Default.Dns) {
-            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                listOf("default" to "Авто", "adguard" to "AdGuard", "cloudflare" to "Cloudflare", "custom" to "Свой").forEachIndexed { i, (v, l) ->
-                    SegmentedButton(
-                        selected = dnsType == v, shape = SegmentedButtonDefaults.itemShape(index = i, count = 4),
-                        onClick = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); scope.launch { settingsStore.saveCustomDns(v); TunnelManager.reloadWireGuard() } }
-                    ) { Text(l, fontSize = 11.sp, maxLines = 1) }
+            dnsType?.let { currentDns ->
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                    listOf("default" to "Авто", "adguard" to "AdGuard", "cloudflare" to "Cloudflare", "custom" to "Свой").forEachIndexed { i, (v, l) ->
+                        val selected = currentDns == v
+                        SegmentedButton(
+                            selected = selected,
+                            shape = SegmentedButtonDefaults.itemShape(index = i, count = 4),
+                            icon = { SegmentedSelectionIcon(selected, animateDnsSelection) },
+                            onClick = {
+                                if (currentDns != v) animateDnsSelection = true
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                scope.launch { settingsStore.saveCustomDns(v); TunnelManager.reloadWireGuard() }
+                            }
+                        ) { Text(l, fontSize = 11.sp, maxLines = 1) }
+                    }
+                }
+                AnimatedVisibility(
+                    visible = currentDns == "custom",
+                    enter = if (animateDnsSelection) expandVertically(spring(stiffness = Spring.StiffnessMedium)) + fadeIn() else EnterTransition.None,
+                    exit = if (animateDnsSelection) shrinkVertically(spring(stiffness = Spring.StiffnessMedium)) + fadeOut() else ExitTransition.None
+                ) {
+                    OutlinedTextField(
+                        value = customDnsIp,
+                        onValueChange = { scope.launch { settingsStore.saveCustomDnsIp(it.trim()) } },
+                        label = { Text("IP адрес DNS сервера") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
+                        shape = RoundedCornerShape(20.dp)
+                    )
+                }
+                AnimatedContent(
+                    targetState = currentDns,
+                    label = "dns_description",
+                    modifier = Modifier.padding(top = 12.dp)
+                ) { selectedDns ->
+                    Text(
+                        when (selectedDns) {
+                            "adguard" -> "Блокирует рекламу и трекеры на уровне пакетов."
+                            "cloudflare" -> "Самый быстрый и приватный DNS."
+                            "custom" -> "Впишите IP-адрес предпочитаемого DNS."
+                            else -> "Использовать DNS провайдера или сервера."
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 14.sp
+                    )
                 }
             }
-            AnimatedVisibility(visible = dnsType == "custom", enter = expandVertically(spring(stiffness = Spring.StiffnessMedium)) + fadeIn(), exit = shrinkVertically(spring(stiffness = Spring.StiffnessMedium)) + fadeOut()) {
-                OutlinedTextField(
-                    value = customDnsIp,
-                    onValueChange = { scope.launch { settingsStore.saveCustomDnsIp(it.trim()) } },
-                    label = { Text("IP адрес DNS сервера") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
-                    shape = RoundedCornerShape(20.dp)
-                )
-            }
-            Text(when(dnsType) { "adguard" -> "Блокирует рекламу и трекеры на уровне пакетов."; "cloudflare" -> "Самый быстрый и приватный DNS."; "custom" -> "Впишите IP-адрес предпочитаемого DNS."; else -> "Использовать DNS провайдера или сервера." }, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 12.dp), fontSize = 14.sp)
         }
     }
 }
@@ -231,37 +892,135 @@ fun PerformanceSettings(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
 
-    val workersCount by settingsStore.workersPerHash.collectAsStateWithLifecycle(24)
-    val captchaMethod by settingsStore.captchaSolveMethod.collectAsStateWithLifecycle("manual")
+    val workersCount by settingsStore.workersPerHash.collectAsStateWithLifecycle(12)
+    var captchaMethod by remember { mutableStateOf<String?>(null) }
     val currentHashesFromStore by settingsStore.vkHashes.collectAsStateWithLifecycle("")
-    val protocol by settingsStore.protocol.collectAsStateWithLifecycle("udp")
-    val currentPeer by settingsStore.peer.collectAsStateWithLifecycle("")
+    val wifiHighPerformance by settingsStore.wifiHighPerformance.collectAsStateWithLifecycle(true)
+    val keepaliveSeconds by settingsStore.clientKeepaliveSeconds.collectAsStateWithLifecycle(10)
 
-    var hashesList by remember { mutableStateOf(listOf("")) }
-    LaunchedEffect(currentHashesFromStore) { hashesList = currentHashesFromStore.split(",").map { it.trim() }.filter { it.isNotEmpty() }.ifEmpty { listOf("") } }
+    var nextHashFieldId by remember { mutableLongStateOf(1L) }
+    var hashFields by remember { mutableStateOf(listOf(VkHashFieldUi(id = 0L, value = ""))) }
+    var lastWrittenHashes by remember { mutableStateOf<String?>(null) }
 
-    fun updateHashes(newList: List<String>) {
-        hashesList = newList
-        scope.launch { settingsStore.save(currentPeer, newList.map { it.trim() }.filter { it.isNotEmpty() }.joinToString(","), "", workersCount, protocol, 9000, "") }
+    fun createHashField(value: String): VkHashFieldUi {
+        val field = VkHashFieldUi(id = nextHashFieldId, value = value)
+        nextHashFieldId += 1L
+        return field
+    }
+
+    fun hashFieldsToStorage(fields: List<VkHashFieldUi>): String {
+        return fields
+            .map { normalizeVkHashInput(it.value) }
+            .filter { it.isNotEmpty() }
+            .joinToString(",")
+    }
+
+    fun setHashFields(newFields: List<VkHashFieldUi>) {
+        hashFields = newFields.take(3).ifEmpty { listOf(createHashField("")) }
+    }
+
+    fun removeHashField(fieldId: Long) {
+        if (hashFields.size <= 1) return
+        setHashFields(hashFields.filterNot { it.id == fieldId })
+    }
+
+    fun addHashField() {
+        if (hashFields.size >= 3 || hashFields.lastOrNull()?.value.isNullOrBlank()) return
+        setHashFields(hashFields + createHashField(""))
+    }
+
+    LaunchedEffect(currentHashesFromStore) {
+        val storeHashes = normalizeVkHashList(currentHashesFromStore)
+
+        if (lastWrittenHashes == storeHashes) {
+            lastWrittenHashes = null
+            return@LaunchedEffect
+        }
+
+        if (storeHashes != hashFieldsToStorage(hashFields)) {
+            hashFields = storeHashes
+                .split(",")
+                .filter { it.isNotEmpty() }
+                .take(3)
+                .map { createHashField(it) }
+                .ifEmpty { listOf(createHashField("")) }
+        }
+    }
+
+    LaunchedEffect(hashFields, currentHashesFromStore) {
+        val persistedHashes = hashFieldsToStorage(hashFields)
+        val storeHashes = normalizeVkHashList(currentHashesFromStore)
+        if (persistedHashes == storeHashes) return@LaunchedEffect
+
+        delay(300)
+        lastWrittenHashes = persistedHashes
+        settingsStore.saveVkHashes(persistedHashes)
     }
     
     var lastWorkerCount by remember(workersCount) { mutableIntStateOf(workersCount) }
+    var lastKeepaliveSeconds by remember(keepaliveSeconds) { mutableIntStateOf(keepaliveSeconds) }
+    var animateCaptchaSelection by remember { mutableStateOf(false) }
+
+    LaunchedEffect(settingsStore) {
+        settingsStore.captchaSolveMethod.collect { captchaMethod = it }
+    }
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         SettingsHeader("Производительность", onBack)
-        CategoryCard("VK Ключи (Hashes)", Icons.Default.VpnKey) {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                hashesList.forEachIndexed { index, hash ->
-                    OutlinedTextField(
-                        value = hash,
-                        onValueChange = { val l = hashesList.toMutableList(); l[index] = it; updateHashes(l) },
-                        label = { Text("Ключ ${index + 1}") }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp), singleLine = true,
-                        trailingIcon = { if (hashesList.size > 1) IconButton(onClick = { val l = hashesList.toMutableList(); l.removeAt(index); updateHashes(l) }) { Icon(Icons.Default.DeleteOutline, null, tint = MaterialTheme.colorScheme.error) } }
-                    )
-                }
-                if (hashesList.size < 3 && hashesList.last().isNotEmpty()) {
-                    FilledTonalButton(onClick = { updateHashes(hashesList + "") }, modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(16.dp)) {
-                        Icon(Icons.Default.Add, null, Modifier.size(20.dp)); Spacer(Modifier.width(8.dp)); Text("Добавить ключ")
+        CategoryCard("VK Ключи (Hashes)", Icons.Default.VpnKey, animateSize = false) {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.Top
+            ) {
+                val slots = buildVkHashSlots(hashFields)
+                val canAddHashField = hashFields.size < 3 && hashFields.lastOrNull()?.value?.isNotBlank() == true
+
+                slots.forEach { slot ->
+                    key(slot.slotIndex) {
+                        AnimatedContent(
+                            targetState = slot,
+                            transitionSpec = {
+                                (
+                                    fadeIn(
+                                        animationSpec = tween(180, delayMillis = 45, easing = FastOutSlowInEasing)
+                                    ) + slideInVertically(
+                                        animationSpec = tween(VK_HASH_ROW_ANIMATION_MS, easing = FastOutSlowInEasing)
+                                    ) { it / 10 } + scaleIn(
+                                        animationSpec = tween(VK_HASH_ROW_ANIMATION_MS, easing = FastOutSlowInEasing),
+                                        initialScale = 0.985f
+                                    )
+                                ) togetherWith (
+                                    fadeOut(
+                                        animationSpec = tween(140, easing = FastOutSlowInEasing)
+                                    ) + slideOutVertically(
+                                        animationSpec = tween(220, easing = FastOutSlowInEasing)
+                                    ) { -it / 12 } + scaleOut(
+                                        animationSpec = tween(180, easing = FastOutSlowInEasing),
+                                        targetScale = 0.985f
+                                    )
+                                ) using SizeTransform(clip = false) { _, _ ->
+                                    tween(VK_HASH_ROW_ANIMATION_MS, easing = FastOutSlowInEasing)
+                                }
+                            },
+                            contentKey = { it.contentKey },
+                            label = "vk_hash_slot_${slot.slotIndex}"
+                        ) { targetSlot ->
+                            VkHashSlotContent(
+                                slot = targetSlot,
+                                fieldCount = hashFields.size,
+                                canAddHashField = canAddHashField,
+                                canEditHashFields = true,
+                                onValueChange = { fieldId, value ->
+                                    setHashFields(
+                                        hashFields.map {
+                                            if (it.id == fieldId) it.copy(value = value) else it
+                                        }
+                                    )
+                                },
+                                onRemove = { fieldId -> removeHashField(fieldId) },
+                                onAdd = { addHashField() }
+                            )
+                        }
                     }
                 }
             }
@@ -274,20 +1033,75 @@ fun PerformanceSettings(onBack: () -> Unit) {
             Slider(
                 value = workersCount.toFloat(),
                 onValueChange = {
-                    val clamped = ((it / 12).roundToInt() * 12).coerceIn(12, 72)
+                    val clamped = it.roundToInt().coerceIn(1, 72)
                     if (clamped != lastWorkerCount) { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); lastWorkerCount = clamped }
-                    scope.launch { settingsStore.save(currentPeer, currentHashesFromStore, "", clamped, protocol, 9000, "") }
-                }, valueRange = 12f..72f, steps = 4
+                    scope.launch { settingsStore.saveWorkersPerHash(clamped) }
+                },
+                valueRange = 1f..72f
             )
+            AnimatedVisibility(visible = workersCount < 12) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.WarningAmber, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "Ниже 12 потоков заметно режет скорость, но может снизить нагрев и расход батареи.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 13.sp
+                    )
+                }
+            }
             Text("Больше потоков — выше скорость, но сильнее расход батареи.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
         }
+        CategoryCard("Энергия и фон", Icons.Default.BatterySaver) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f).padding(end = 16.dp)) {
+                    Text("Высокая производительность Wi-Fi", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Text("Держит Wi-Fi в low-latency режиме. Стабильнее, но может греть телефон.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
+                }
+                Switch(
+                    checked = wifiHighPerformance,
+                    onCheckedChange = {
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        scope.launch { settingsStore.saveWifiHighPerformance(it) }
+                    }
+                )
+            }
+            Divider(modifier = Modifier.padding(vertical = 16.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text("Keepalive клиента", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                AnimatedContent(targetState = keepaliveSeconds, label = "") { seconds -> Text("$seconds сек", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, fontSize = 16.sp) }
+            }
+            Slider(
+                value = keepaliveSeconds.toFloat(),
+                onValueChange = {
+                    val seconds = it.roundToInt().coerceIn(5, 60)
+                    if (seconds != lastKeepaliveSeconds) { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); lastKeepaliveSeconds = seconds }
+                    scope.launch { settingsStore.saveClientKeepaliveSeconds(seconds) }
+                },
+                valueRange = 5f..60f
+            )
+            Text("Больше интервал — меньше фоновой активности. Если соединение начинает засыпать, верни 10 секунд.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
+        }
         CategoryCard("Решение капчи", Icons.Default.SmartToy) {
-            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                captchaMethodOptions.forEachIndexed { i, (v, l) ->
-                    SegmentedButton(
-                        selected = captchaMethod == v || (captchaMethod == "auto" && v == "rjs_classic"), shape = SegmentedButtonDefaults.itemShape(index = i, count = captchaMethodOptions.size),
-                        onClick = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); scope.launch { settingsStore.saveCaptchaMode(captchaModeForMethod(v)); settingsStore.saveCaptchaSolveMethod(v) } }
-                    ) { Text(l, fontSize = 14.sp) }
+            captchaMethod?.let { currentCaptchaMethod ->
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                    captchaMethodOptions.forEachIndexed { i, (v, l) ->
+                        val selected = currentCaptchaMethod == v || (currentCaptchaMethod == "auto" && v == "rjs_classic")
+                        SegmentedButton(
+                            selected = selected,
+                            shape = SegmentedButtonDefaults.itemShape(index = i, count = captchaMethodOptions.size),
+                            icon = { SegmentedSelectionIcon(selected, animateCaptchaSelection) },
+                            onClick = {
+                                if (!selected) animateCaptchaSelection = true
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                scope.launch { settingsStore.saveCaptchaMode(captchaModeForMethod(v)); settingsStore.saveCaptchaSolveMethod(v) }
+                            }
+                        ) { Text(l, fontSize = 14.sp) }
+                    }
                 }
             }
         }
@@ -302,20 +1116,37 @@ fun InterfaceSettings(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
 
-    val themeMode by settingsStore.themeMode.collectAsStateWithLifecycle("system")
+    var themeMode by remember { mutableStateOf<String?>(null) }
     val dynamicColor by settingsStore.useDynamicColor.collectAsStateWithLifecycle(true)
+    var animateThemeSelection by remember { mutableStateOf(false) }
+
+    LaunchedEffect(settingsStore) {
+        settingsStore.themeMode.collect { themeMode = it }
+    }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         SettingsHeader("Интерфейс", onBack)
-        CategoryCard("Внешний вид", Icons.Default.Palette) {
+        CategoryCard("Внешний вид", Icons.Default.Palette, animateSize = false) {
             Text("Тема оформления", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, fontSize = 16.sp)
             Spacer(Modifier.height(12.dp))
-            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                listOf("system" to "Авто", "light" to "Светлая", "dark" to "Темная", "amoled" to "Amoled").forEachIndexed { i, (v, l) ->
-                    SegmentedButton(
-                        selected = themeMode == v, shape = SegmentedButtonDefaults.itemShape(index = i, count = 4),
-                        onClick = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); scope.launch { settingsStore.saveThemeMode(v) } }
-                    ) { Text(l, fontSize = 12.sp, maxLines = 1) }
+            if (themeMode == null) {
+                Spacer(Modifier.fillMaxWidth().height(40.dp))
+            } else {
+                val currentThemeMode = themeMode ?: "system"
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                    listOf("system" to "Авто", "light" to "Светлая", "dark" to "Темная", "amoled" to "Amoled").forEachIndexed { i, (v, l) ->
+                        val selected = currentThemeMode == v
+                        SegmentedButton(
+                            selected = selected,
+                            shape = SegmentedButtonDefaults.itemShape(index = i, count = 4),
+                            icon = { SegmentedSelectionIcon(selected, animateThemeSelection) },
+                            onClick = {
+                                if (currentThemeMode != v) animateThemeSelection = true
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                scope.launch { settingsStore.saveThemeMode(v) }
+                            }
+                        ) { Text(l, fontSize = 12.sp, maxLines = 1) }
+                    }
                 }
             }
             Divider(modifier = Modifier.padding(vertical = 16.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
@@ -372,8 +1203,30 @@ fun SettingsHeader(title: String, onBack: () -> Unit) {
 }
 
 @Composable
-private fun CategoryCard(title: String, icon: ImageVector, content: @Composable ColumnScope.() -> Unit) {
-    Surface(shape = RoundedCornerShape(32.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh, modifier = Modifier.fillMaxWidth()) {
+private fun CategoryCard(
+    title: String,
+    icon: ImageVector,
+    animateSize: Boolean = true,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    val cardModifier = if (animateSize) {
+        Modifier
+            .fillMaxWidth()
+            .animateContentSize(
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioNoBouncy,
+                    stiffness = Spring.StiffnessMediumLow
+                )
+            )
+    } else {
+        Modifier.fillMaxWidth()
+    }
+
+    Surface(
+        shape = RoundedCornerShape(32.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = cardModifier
+    ) {
         Column(modifier = Modifier.padding(24.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 20.dp)) {
                 Icon(icon, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp))
@@ -415,16 +1268,89 @@ private fun SettingSwitchRow(icon: ImageVector, title: String, subtitle: String,
     }
 }
 
+private fun updateChannelDescription(channel: String): String {
+    return when (normalizeUpdateChannel(channel)) {
+        "dev" -> "Весь мусор от разработчика. Не рекомендуется ставить."
+        "pre" -> "Тестовые pre-release сборки, тестируемые перед релизом."
+        else -> "Только стабильные релизы."
+    }
+}
+
 @Composable
 fun ImportantInfoDialog(onDismiss: () -> Unit) {
+    AssetMarkdownDialog(title = "Справка", assetName = "HELP.md", onDismiss = onDismiss)
+}
+
+@Composable
+fun ChangelogDialog(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val appVersionName = remember(context) { readAppVersionName(context) }
+    val changelog = remember(context, appVersionName) {
+        filterChangelogForVersion(readAssetText(context, "CHANGELOG.md"), appVersionName)
+    }
+
+    MarkdownDialog(title = "История изменений", markdown = changelog, onDismiss = onDismiss)
+}
+
+@Composable
+private fun AssetMarkdownDialog(title: String, assetName: String, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val markdown = remember(context, assetName) { readAssetText(context, assetName) }
+
+    MarkdownDialog(title = title, markdown = markdown, onDismiss = onDismiss)
+}
+
+@Composable
+private fun MarkdownDialog(title: String, markdown: String, onDismiss: () -> Unit) {
     Dialog(onDismissRequest = onDismiss) {
         Surface(shape = RoundedCornerShape(32.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
-            Column(modifier = Modifier.padding(28.dp).verticalScroll(rememberScrollState())) {
-                Text("Справка", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Column(modifier = Modifier.padding(28.dp)) {
+                Text(title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(20.dp))
-                Text("• WebView — ручное прохождение через окно капчи.\n\n• RJS — старый автоматический метод.\n\n• Slider — новый автоматический RJS-метод из ветки 1.1.0.\n\n• Ссылки (nxiwnetwork://) при экспорте содержат пароль от туннеля. Не передавайте их третьим лицам.\n\n• Если туннель подключается, но интернета нет — обновите VK Ключи.", style = MaterialTheme.typography.bodyLarge, lineHeight = 24.sp, fontSize = 16.sp)
-                Spacer(Modifier.height(32.dp))
-                Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth().height(56.dp), shape = RoundedCornerShape(24.dp)) { Text("Закрыть", fontWeight = FontWeight.Bold, fontSize = 16.sp) }
+                Column(modifier = Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState())) {
+                    MarkdownContent(markdown)
+                }
+                Spacer(Modifier.height(24.dp))
+                Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth().height(56.dp), shape = RoundedCornerShape(24.dp)) {
+                    Text("Закрыть", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MarkdownContent(markdown: String) {
+    markdown.lineSequence().forEach { line ->
+        when {
+            line.startsWith("# ") -> Unit
+            line.startsWith("## ") -> {
+                Text(
+                    line.removePrefix("## ").trim(),
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(top = 12.dp, bottom = 8.dp)
+                )
+            }
+            line.startsWith("- ") -> {
+                Text(
+                    "• ${line.removePrefix("- ").trim()}",
+                    style = MaterialTheme.typography.bodyLarge,
+                    lineHeight = 24.sp,
+                    fontSize = 16.sp,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+            }
+            line.isBlank() -> Spacer(Modifier.height(4.dp))
+            else -> {
+                Text(
+                    line,
+                    style = MaterialTheme.typography.bodyLarge,
+                    lineHeight = 24.sp,
+                    fontSize = 16.sp,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
             }
         }
     }

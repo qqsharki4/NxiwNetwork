@@ -39,6 +39,8 @@ object TunnelManager {
     private var metricsJob: Job? = null
     private var wgHelper: WireGuardHelper? = null
     @Volatile private var processRestartExpected = false
+    @Volatile private var processStopExpected = false
+    @Volatile private var userRequestedStopPending = false
 
     private var floodCount = 0
     private var mismatchCount = 0
@@ -191,10 +193,11 @@ object TunnelManager {
                 }
 
                 val hashCount = hashList.size.coerceIn(1, 3)
-                val totalWorkers = params.workersPerHash.coerceIn(1, 128) 
+                val totalWorkers = params.workersPerHash.coerceIn(1, 128)
+                val keepaliveSeconds = params.clientKeepaliveSeconds.coerceIn(5, 60)
                 
                 val hashMode = if (activeHashIndex == 0) "Основной" else "Запасной"
-                updateLog("config_info", "[$hashMode] Хешей=$hashCount, Потоков=$totalWorkers", 1)
+                updateLog("config_info", "[$hashMode] Хешей=$hashCount, Потоков=$totalWorkers, Keepalive=${keepaliveSeconds}с", 1)
 
                 val binaryPath = context.applicationInfo.nativeLibraryDir + "/libclient.so"
                 val binaryFile = File(binaryPath)
@@ -206,11 +209,13 @@ object TunnelManager {
                     return@launch
                 }
 
+                val peerEndpoint = normalizeNodeEndpoint(params.peer)
                 val cmd = mutableListOf(
                     binaryPath,
-                    "-peer", params.peer,
+                    "-peer", peerEndpoint,
                     "-vk", hashList.joinToString(","),
                     "-n", totalWorkers.toString(),
+                    "-keepalive-sec", keepaliveSeconds.toString(),
                     "-listen", "127.0.0.1:${params.port}"
                 )
 
@@ -254,7 +259,7 @@ object TunnelManager {
                 running.value = true
                 updateWidgetState()
                 
-                val serverIp = params.peer.substringBefore(":")
+                val serverIp = nodeEndpointHost(peerEndpoint).ifBlank { params.peer.substringBefore(":") }
                 startMetricsMonitor(serverIp)
                 startLogReader()
                 startWatchdog(appContext, params)
@@ -470,7 +475,9 @@ object TunnelManager {
                     }
                 }
             } catch (e: Exception) {
-                updateLog("sys_error", "Процесс остановлен: ${e.message}", -1, true)
+                if (!processRestartExpected && !processStopExpected) {
+                    updateLog("sys_error", "Процесс остановлен: ${e.message}", -1, true)
+                }
             } finally {
                 if (process === readerProcess) {
                     process = null
@@ -481,6 +488,7 @@ object TunnelManager {
                     running.value = false
                     updateWidgetState()
                 }
+                processStopExpected = false
             }
         }
     }
@@ -561,6 +569,12 @@ object TunnelManager {
         }
     }
 
+    fun consumeUserRequestedStop(): Boolean {
+        val result = userRequestedStopPending
+        userRequestedStopPending = false
+        return result
+    }
+
     fun pause() {
         if (!running.value) return
         killProcess(keepRunning = true)
@@ -575,12 +589,13 @@ object TunnelManager {
         }
     }
 
-    private fun killProcess(keepRunning: Boolean = false) {
+    private fun killProcess(keepRunning: Boolean = false, expectedStop: Boolean = false) {
         if (keepRunning) {
             processRestartExpected = true
         } else {
             processRestartExpected = false
         }
+        processStopExpected = keepRunning || expectedStop
         watchdogJob?.cancel()
         readerJob?.cancel()
         metricsJob?.cancel()
@@ -606,11 +621,14 @@ object TunnelManager {
         killProcess(keepRunning = true)
     }
 
-    fun stop() {
+    fun stop(userRequested: Boolean = false) {
+        if (userRequested) {
+            userRequestedStopPending = true
+        }
         scope.launch(Dispatchers.Main) {
             wgHelper?.stopTunnel()
         }
-        killProcess()
+        killProcess(expectedStop = userRequested)
         activeWorkers.value = 0
         currentParams = null
         ManlCaptchaWebViewManager.cancelCaptcha()
@@ -716,5 +734,7 @@ data class TunnelParams(
     val sni: String = "",
     val connectionPassword: String = "",
     val protocol: String = "udp",
-    val captchaMode: String = "rjs"
+    val captchaMode: String = "rjs",
+    val wifiHighPerformance: Boolean = true,
+    val clientKeepaliveSeconds: Int = 10
 )
