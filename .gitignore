@@ -21,9 +21,6 @@ client/android/app/debug/
 client/android/app/build/
 client/android/app/release/
 
-# ===== Go =====
-go.sum
-
 # ===== Native Libraries (compiled) =====
 *.so
 *.dll
@@ -36,6 +33,7 @@ client/android/app/src/main/assets/server
 # server
 
 # ===== Keystore / Secrets =====
+client/android/keystore.properties
 *.keystore
 *.jks
 *.key

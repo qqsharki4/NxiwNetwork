@@ -36,6 +36,7 @@ func WorkerGroup(
 	cycleDuration time.Duration,
 	pauseFlag *int32,
 	deviceID, password string,
+	keepaliveInterval time.Duration,
 	stats *Stats,
 	waitReady <-chan struct{},
 	signalReady chan<- struct{},
@@ -130,7 +131,8 @@ func WorkerGroup(
 		}
 		cycleDurationLocal := time.Duration(sleepDuration) * time.Second
 
-		log.Printf("[ГРУППА #%d] Запуск %d потоков (до смены кредов: %d сек)", groupID, workersPerGroup, sleepDuration)
+		groupWorkerCount := len(workerIDs)
+		log.Printf("[ГРУППА #%d] Запуск %d потоков (до смены кредов: %d сек)", groupID, groupWorkerCount, sleepDuration)
 
 		log.Printf("[ГРУППА #%d] Креды OK, TURN: %v, %d воркеров", groupID, creds.TurnURLs, len(workerIDs))
 
@@ -194,7 +196,7 @@ func WorkerGroup(
 					}
 
 					configDelivered, sessErr := RunSession(batchCtx, tp, peer, d, localPort, useUDP,
-						getConf, cc, wid, creds, deviceID, password, stats)
+						getConf, cc, wid, creds, deviceID, password, keepaliveInterval, stats)
 
 					if getConf {
 						if configDelivered {
@@ -232,7 +234,7 @@ func WorkerGroup(
 							quotaErrorWorkers.Store(wid, true)
 							qCount := 0
 							quotaErrorWorkers.Range(func(k, v any) bool { qCount++; return true })
-							if qCount >= 5 {
+							if qCount >= minInt(5, groupWorkerCount) {
 								select {
 								case refreshCh <- struct{}{}:
 									log.Printf("[ГРУППА #%d] Досрочная ротация: исчерпана квота TURN у %d воркеров", groupID, qCount)
@@ -267,8 +269,8 @@ func WorkerGroup(
 							nfCount := 0
 							notFoundErrorWorkers.Range(func(k, v any) bool { nfCount++; return true })
 
-							// Если 8 уникальных воркеров получили явный отказ от сервера — ключи 100% протухли
-							if nfCount >= 8 {
+							// Если большинство воркеров получили явный отказ от сервера — ключи протухли.
+							if nfCount >= minInt(8, groupWorkerCount) {
 								select {
 								case refreshCh <- struct{}{}:
 									log.Printf("[ГРУППА #%d] Досрочная ротация: сервер ВК убил сессию (у %d воркеров)", groupID, nfCount)

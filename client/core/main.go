@@ -114,6 +114,7 @@ func main() {
 	userAgent := flag.String("user-agent", "", "User-Agent строка устройства")
 	connPassword := flag.String("password", "", "пароль подключения")
 	captchaModeFlag := flag.String("captcha-mode", "rjs", "режим капчи: wv, rjs или rjs_slider")
+	keepaliveSeconds := flag.Int("keepalive-sec", 10, "интервал keepalive клиента в секундах (5-60)")
 
 	flag.Parse()
 
@@ -148,10 +149,16 @@ func main() {
 	if *numW > maxWorkers {
 		*numW = maxWorkers
 	}
-	if *numW < workersPerGroup {
-		*numW = workersPerGroup
+	if *numW < 1 {
+		*numW = 1
 	}
-	*numW = (*numW / workersPerGroup) * workersPerGroup
+	if *keepaliveSeconds < 5 {
+		*keepaliveSeconds = 5
+	}
+	if *keepaliveSeconds > 60 {
+		*keepaliveSeconds = 60
+	}
+	keepaliveInterval := time.Duration(*keepaliveSeconds) * time.Second
 
 	tp := &TurnParams{
 		Host:          *host,
@@ -178,11 +185,11 @@ func main() {
 		localPort = "9000"
 	}
 
-	numGroups := *numW / workersPerGroup
+	numGroups := (*numW + workersPerGroup - 1) / workersPerGroup
 
 	log.Println("[КЛИЕНТ] ═══════════════════════════════════════")
 	log.Printf("[КЛИЕНТ] VK App: %s", *appID)
-	log.Printf("[КЛИЕНТ] Воркеров: %d (групп: %d, по %d)", *numW, numGroups, workersPerGroup)
+	log.Printf("[КЛИЕНТ] Воркеров: %d (групп: %d, до %d в группе)", *numW, numGroups, workersPerGroup)
 	log.Printf("[КЛИЕНТ] Хешей: %d", len(hashes))
 	log.Printf("[КЛИЕНТ] Слушаю: %s | Пир: %s", *listen, *peerAddr)
 	proto := "TCP"
@@ -192,6 +199,7 @@ func main() {
 	log.Printf("[КЛИЕНТ] Протокол: %s", proto)
 	log.Printf("[КЛИЕНТ] Device ID: %s", *deviceID)
 	log.Printf("[КЛИЕНТ] Обход капчи: %s", captchaMode.Load().(string))
+	log.Printf("[КЛИЕНТ] Keepalive: %d сек", *keepaliveSeconds)
 	log.Println("[КЛИЕНТ] ═══════════════════════════════════════")
 
 	stats := NewStats()
@@ -264,7 +272,12 @@ func main() {
 			prevWaitReady = ch
 		}
 
-		ids := make([]int, workersPerGroup)
+		remainingWorkers := *numW - (g * workersPerGroup)
+		groupSize := remainingWorkers
+		if groupSize > workersPerGroup {
+			groupSize = workersPerGroup
+		}
+		ids := make([]int, groupSize)
 		for i := range ids {
 			ids[i] = workerIDCounter
 			workerIDCounter++
@@ -281,7 +294,7 @@ func main() {
 		go func(groupID int, cycleDir time.Duration, isFirstGroup bool, configChan chan<- string, workerIds []int, startHashIndex int, waitR <-chan struct{}, sigR chan<- struct{}) {
 			defer wg.Done()
 			WorkerGroup(ctx, groupID, startHashIndex, tp, peer, disp, localPort, *useUDP,
-				isFirstGroup, configChan, workerIds, cycleDir, &pauseFlag, *deviceID, *connPassword, stats, waitR, sigR)
+				isFirstGroup, configChan, workerIds, cycleDir, &pauseFlag, *deviceID, *connPassword, keepaliveInterval, stats, waitR, sigR)
 		}(gID, cycle, isFirst, cc, ids, g, myWaitReady, mySignalReady)
 	}
 

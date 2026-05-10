@@ -60,9 +60,13 @@ func RunSession(
 	sessionID int,
 	creds *Credentials,
 	deviceID, password string,
+	keepaliveInterval time.Duration,
 	stats *Stats,
 ) (bool, error) {
 	configDelivered := false
+	if keepaliveInterval <= 0 {
+		keepaliveInterval = 10 * time.Second
+	}
 
 	if len(creds.TurnURLs) == 0 {
 		return false, fmt.Errorf("нет TURN URL в учетных данных")
@@ -154,7 +158,7 @@ func RunSession(
 	sessionWg.Add(1)
 	go func() {
 		defer sessionWg.Done()
-		t := time.NewTicker(10 * time.Second)
+		t := time.NewTicker(keepaliveInterval)
 		defer t.Stop()
 		for {
 			select {
@@ -293,7 +297,7 @@ func RunSession(
 	go func() {
 		defer proxyWg.Done()
 		defer sessCancel()
-		ticker := time.NewTicker(10 * time.Second)
+		ticker := time.NewTicker(keepaliveInterval)
 		defer ticker.Stop()
 		var lastWriteDeadline time.Time
 		for {
