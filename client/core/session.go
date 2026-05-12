@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -24,6 +25,8 @@ const (
 	readBufSize        = 1600
 	socketBufSize      = 625 * 1024
 )
+
+var wakeupPacket = []byte("WAKEUP")
 
 // NullLoggerFactory подавляет логи pion
 type NullLoggerFactory struct{}
@@ -282,7 +285,16 @@ func RunSession(
 		SendCh: make(chan []byte, workerSendBuf),
 	}
 	d.Register(slot)
-	defer d.Unregister(slot)
+	slotRegistered := true
+	unregisterSlot := func() {
+		if !slotRegistered {
+			return
+		}
+		d.Unregister(slot)
+		slotRegistered = false
+		drainPacketChannel(slot.SendCh)
+	}
+	defer unregisterSlot()
 
 	// Proxy DTLS ↔ Dispatcher
 	var proxyWg sync.WaitGroup
@@ -300,15 +312,19 @@ func RunSession(
 		ticker := time.NewTicker(keepaliveInterval)
 		defer ticker.Stop()
 		var lastWriteDeadline time.Time
+		lastPayloadWrite := time.Now()
 		for {
 			select {
 			case <-sessCtx.Done():
 				return
 			case <-ticker.C:
 				now := time.Now()
+				if now.Sub(lastPayloadWrite) < keepaliveInterval {
+					continue
+				}
 				_ = dtlsConn.SetWriteDeadline(now.Add(5 * time.Second))
 				lastWriteDeadline = now
-				if _, writeErr := dtlsConn.Write([]byte("WAKEUP")); writeErr != nil {
+				if _, writeErr := dtlsConn.Write(wakeupPacket); writeErr != nil {
 					log.Printf("[ВОРКЕР #%d] Ошибка Writer (WAKEUP): %v", sessionID, writeErr)
 					return
 				}
@@ -322,9 +338,12 @@ func RunSession(
 					lastWriteDeadline = now
 				}
 				if _, writeErr := dtlsConn.Write(pkt); writeErr != nil {
+					releasePacket(pkt)
 					log.Printf("[ВОРКЕР #%d] Ошибка Writer (Payload): %v", sessionID, writeErr)
 					return
 				}
+				lastPayloadWrite = now
+				releasePacket(pkt)
 			}
 		}
 	}()
@@ -354,15 +373,15 @@ func RunSession(
 				return
 			}
 
-			if n == 6 && string(b[:6]) == "WAKEUP" {
+			if n == len(wakeupPacket) && bytes.Equal(b[:n], wakeupPacket) {
 				continue
 			}
 
-			pkt := make([]byte, n)
-			copy(pkt, b[:n])
+			pkt := copyPacket(b[:n])
 			select {
 			case d.ReturnCh <- pkt:
 			case <-sessCtx.Done():
+				releasePacket(pkt)
 				return
 			}
 		}
@@ -370,6 +389,7 @@ func RunSession(
 
 	proxyWg.Wait()
 	sessCancel()
+	unregisterSlot()
 	relayWg.Wait()
 	sessionWg.Wait()
 	_ = pipeA.Close()

@@ -92,9 +92,6 @@ func (d *Dispatcher) readLoop() {
 		d.clientAddr.Store(&addr)
 		atomic.AddInt64(&d.stats.TotalBytesUp, int64(n))
 
-		pkt := make([]byte, n)
-		copy(pkt, buf[:n])
-
 		d.mu.Lock()
 		nw := len(d.workers)
 		if nw == 0 {
@@ -102,6 +99,7 @@ func (d *Dispatcher) readLoop() {
 			continue
 		}
 
+		pkt := copyPacket(buf[:n])
 		sent := false
 		startIdx := d.rrIndex % nw
 		for i := 0; i < nw; i++ {
@@ -119,6 +117,7 @@ func (d *Dispatcher) readLoop() {
 		}
 		if !sent {
 			d.rrIndex = (startIdx + 1) % nw
+			releasePacket(pkt)
 		}
 		d.mu.Unlock()
 	}
@@ -134,15 +133,19 @@ func (d *Dispatcher) writeLoop() {
 		case pkt := <-d.ReturnCh:
 			addrPtr := d.clientAddr.Load()
 			if addrPtr == nil {
+				releasePacket(pkt)
 				continue
 			}
 			addr := *addrPtr
 			if _, err := d.localConn.WriteTo(pkt, addr); err != nil {
+				releasePacket(pkt)
 				if d.ctx.Err() != nil {
 					return
 				}
+				continue
 			}
 			atomic.AddInt64(&d.stats.TotalBytesDown, int64(len(pkt)))
+			releasePacket(pkt)
 		}
 	}
 }
