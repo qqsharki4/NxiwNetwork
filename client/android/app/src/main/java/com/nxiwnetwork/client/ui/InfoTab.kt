@@ -47,7 +47,6 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nxiwnetwork.client.AvailableUpdate
-import com.nxiwnetwork.client.GitHubRateLimitException
 import com.nxiwnetwork.client.ReleaseUpdater
 import com.nxiwnetwork.client.filterChangelogForVersion
 import com.nxiwnetwork.client.SettingsStore
@@ -61,8 +60,8 @@ import com.nxiwnetwork.client.normalizeVkHashInput
 import com.nxiwnetwork.client.normalizeVkHashList
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -74,6 +73,10 @@ import kotlin.math.roundToInt
 private const val VK_HASH_ROW_ANIMATION_MS = 300
 private const val VK_HASH_TRASH_ANIMATION_MS = 320
 private const val UPDATE_REMIND_LATER_MS = 24L * 60L * 60L * 1000L
+
+private fun <S> AnimatedContentTransitionScope<S>.noContentAnimation(): ContentTransform =
+    (EnterTransition.None togetherWith ExitTransition.None) using
+        SizeTransform(clip = false) { _, _ -> tween(0) }
 
 private data class VkHashFieldUi(
     val id: Long,
@@ -143,6 +146,7 @@ private fun buildVkHashSlots(fields: List<VkHashFieldUi>): List<VkHashSlotUi> {
 private fun VkHashDeleteSlot(
     slotWidth: Dp,
     visible: Boolean,
+    animate: Boolean,
     enabled: Boolean,
     onClick: () -> Unit
 ) {
@@ -152,18 +156,26 @@ private fun VkHashDeleteSlot(
     ) {
         AnimatedVisibility(
             visible = visible,
-            enter = fadeIn(
-                tween(210, delayMillis = 80, easing = FastOutSlowInEasing)
-            ) + scaleIn(
-                tween(250, delayMillis = 40, easing = FastOutSlowInEasing),
-                initialScale = 0.9f
-            ),
-            exit = fadeOut(
-                tween(140, easing = FastOutSlowInEasing)
-            ) + scaleOut(
-                tween(160, easing = FastOutSlowInEasing),
-                targetScale = 0.9f
-            )
+            enter = if (animate) {
+                fadeIn(
+                    tween(210, delayMillis = 80, easing = FastOutSlowInEasing)
+                ) + scaleIn(
+                    tween(250, delayMillis = 40, easing = FastOutSlowInEasing),
+                    initialScale = 0.9f
+                )
+            } else {
+                EnterTransition.None
+            },
+            exit = if (animate) {
+                fadeOut(
+                    tween(140, easing = FastOutSlowInEasing)
+                ) + scaleOut(
+                    tween(160, easing = FastOutSlowInEasing),
+                    targetScale = 0.9f
+                )
+            } else {
+                ExitTransition.None
+            }
         ) {
             IconButton(
                 enabled = enabled,
@@ -181,6 +193,7 @@ private fun VkHashSlotContent(
     fieldCount: Int,
     canAddHashField: Boolean,
     canEditHashFields: Boolean,
+    animateInteractions: Boolean,
     onValueChange: (Long, String) -> Unit,
     onRemove: (Long) -> Unit,
     onAdd: () -> Unit
@@ -199,6 +212,7 @@ private fun VkHashSlotContent(
             VkHashSlotType.Field -> VkHashFieldRow(
                 slot = slot,
                 fieldCount = fieldCount,
+                animateInteractions = animateInteractions,
                 onValueChange = onValueChange,
                 onRemove = onRemove
             )
@@ -215,6 +229,7 @@ private fun VkHashSlotContent(
 private fun VkHashFieldRow(
     slot: VkHashSlotUi,
     fieldCount: Int,
+    animateInteractions: Boolean,
     onValueChange: (Long, String) -> Unit,
     onRemove: (Long) -> Unit
 ) {
@@ -222,7 +237,11 @@ private fun VkHashFieldRow(
     val showDeleteButton = fieldCount > 1
     val deleteSlotWidth by animateDpAsState(
         targetValue = if (showDeleteButton) 56.dp else 0.dp,
-        animationSpec = tween(VK_HASH_TRASH_ANIMATION_MS, easing = FastOutSlowInEasing),
+        animationSpec = if (animateInteractions) {
+            tween(VK_HASH_TRASH_ANIMATION_MS, easing = FastOutSlowInEasing)
+        } else {
+            tween(0)
+        },
         label = "vk_hash_delete_slot"
     )
 
@@ -241,6 +260,7 @@ private fun VkHashFieldRow(
         VkHashDeleteSlot(
             slotWidth = deleteSlotWidth,
             visible = showDeleteButton,
+            animate = animateInteractions,
             enabled = true,
             onClick = { onRemove(fieldId) }
         )
@@ -603,13 +623,15 @@ fun UpdatesSettings(onBack: () -> Unit) {
     val settingsStore = remember(context) { SettingsStore(context) }
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
-    val selectedChannel by settingsStore.updateChannel.collectAsStateWithLifecycle("stable")
+    val selectedChannelOrNull by remember(settingsStore) {
+        settingsStore.updateChannel.map { normalizeUpdateChannel(it) }
+    }.collectAsStateWithLifecycle(null)
     val updateLastCheckAt by settingsStore.updateLastCheckAt.collectAsStateWithLifecycle(0L)
     val updateRateLimitUntil by settingsStore.updateRateLimitUntil.collectAsStateWithLifecycle(0L)
     val checkingUpdates by UpdateCheckCoordinator.isChecking.collectAsStateWithLifecycle()
     val availableUpdates by UpdateCheckCoordinator.availableUpdates.collectAsStateWithLifecycle()
     val downloadState by UpdateCheckCoordinator.downloadState.collectAsStateWithLifecycle()
-    val selected = normalizeUpdateChannel(selectedChannel)
+    val selected = selectedChannelOrNull ?: "stable"
     val appVersionName = remember(context) { readAppVersionName(context) }
     val installedVersion = remember(appVersionName) { ReleaseUpdater.parseVersion(appVersionName) }
     val newerUpdates = remember(availableUpdates, installedVersion) {
@@ -640,19 +662,23 @@ fun UpdatesSettings(onBack: () -> Unit) {
     ) {
         SettingsHeader("Обновления", onBack)
 
-        CategoryCard("Канал обновлений", Icons.Default.SystemUpdate) {
-            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                listOf("stable" to "Stable", "pre" to "Pre", "dev" to "Dev").forEachIndexed { index, (value, label) ->
-                    SegmentedButton(
-                        selected = selected == value,
-                        shape = SegmentedButtonDefaults.itemShape(index = index, count = 3),
-                        onClick = {
-                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            animateUpdateChanges = true
-                            scope.launch { settingsStore.saveUpdateChannel(value) }
+        CategoryCard("Канал обновлений", Icons.Default.SystemUpdate, animateSize = animateUpdateChanges) {
+            if (selectedChannelOrNull == null) {
+                Spacer(Modifier.fillMaxWidth().height(40.dp))
+            } else {
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                    listOf("stable" to "Stable", "pre" to "Pre", "dev" to "Dev").forEachIndexed { index, (value, label) ->
+                        SegmentedButton(
+                            selected = selected == value,
+                            shape = SegmentedButtonDefaults.itemShape(index = index, count = 3),
+                            onClick = {
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                animateUpdateChanges = true
+                                scope.launch { settingsStore.saveUpdateChannel(value) }
+                            }
+                        ) {
+                            Text(label, fontSize = 13.sp, maxLines = 1)
                         }
-                    ) {
-                        Text(label, fontSize = 13.sp, maxLines = 1)
                     }
                 }
             }
@@ -668,7 +694,7 @@ fun UpdatesSettings(onBack: () -> Unit) {
                         if (animateUpdateChanges) {
                             fadeIn(tween(140, delayMillis = 30)) togetherWith fadeOut(tween(100))
                         } else {
-                            EnterTransition.None togetherWith ExitTransition.None
+                            noContentAnimation()
                         }
                     },
                     label = "update_channel_description"
@@ -702,7 +728,7 @@ fun UpdatesSettings(onBack: () -> Unit) {
             }
         }
 
-        CategoryCard("Проверка обновлений", Icons.Default.Update) {
+        CategoryCard("Проверка обновлений", Icons.Default.Update, animateSize = animateUpdateChanges) {
             Text(
                 formatUpdateCheckTime(updateLastCheckAt, nowMillis),
                 style = MaterialTheme.typography.bodyMedium,
@@ -710,7 +736,11 @@ fun UpdatesSettings(onBack: () -> Unit) {
                 modifier = Modifier.padding(top = 4.dp, bottom = 16.dp),
                 fontSize = 14.sp
             )
-            AnimatedVisibility(visible = rateLimitAlert != null) {
+            AnimatedVisibility(
+                visible = rateLimitAlert != null,
+                enter = if (animateUpdateChanges) fadeIn(tween(140)) + expandVertically(tween(180, easing = FastOutSlowInEasing)) else EnterTransition.None,
+                exit = if (animateUpdateChanges) fadeOut(tween(100)) + shrinkVertically(tween(160, easing = FastOutSlowInEasing)) else ExitTransition.None
+            ) {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -748,7 +778,7 @@ fun UpdatesSettings(onBack: () -> Unit) {
             }
         }
 
-        CategoryCard("Доступные обновления", Icons.Default.NewReleases) {
+        CategoryCard("Доступные обновления", Icons.Default.NewReleases, animateSize = animateUpdateChanges) {
             if (checkingUpdates && displayedUpdates.isEmpty()) {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
@@ -767,7 +797,7 @@ fun UpdatesSettings(onBack: () -> Unit) {
                                 tween(durationMillis = 220, easing = FastOutSlowInEasing)
                             }
                     } else {
-                        EnterTransition.None togetherWith ExitTransition.None
+                        noContentAnimation()
                     }
                 },
                 label = "available_updates_content"
@@ -852,109 +882,115 @@ fun NetworkSettings(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
 
-    var protocol by remember { mutableStateOf<String?>(null) }
+    val protocol by settingsStore.protocol.collectAsStateWithLifecycle("udp")
     val customMtu by settingsStore.customMtu.collectAsStateWithLifecycle(0)
-    var dnsType by remember { mutableStateOf<String?>(null) }
+    val dnsType by settingsStore.customDns.collectAsStateWithLifecycle("default")
     val customDnsIp by settingsStore.customDnsIp.collectAsStateWithLifecycle("1.1.1.1")
 
     var lastMtu by remember(customMtu) { mutableIntStateOf(customMtu) }
     var animateProtocolSelection by remember { mutableStateOf(false) }
+    var animateMtuValue by remember { mutableStateOf(false) }
     var animateDnsSelection by remember { mutableStateOf(false) }
-
-    LaunchedEffect(settingsStore) {
-        settingsStore.protocol.collect { protocol = it }
-    }
-
-    LaunchedEffect(settingsStore) {
-        settingsStore.customDns.collect { dnsType = it }
-    }
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         SettingsHeader("Сеть", onBack)
         CategoryCard("Транспорт", Icons.Default.CompareArrows) {
             Text("Сетевой протокол", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, fontSize = 16.sp)
             Spacer(Modifier.height(12.dp))
-            protocol?.let { currentProtocol ->
-                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                    listOf("udp" to "UDP", "tcp" to "TCP").forEachIndexed { i, (v, l) ->
-                        val selected = currentProtocol == v
-                        SegmentedButton(
-                            selected = selected,
-                            shape = SegmentedButtonDefaults.itemShape(index = i, count = 2),
-                            icon = { SegmentedSelectionIcon(selected, animateProtocolSelection) },
-                            onClick = {
-                                if (currentProtocol != v) animateProtocolSelection = true
-                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                scope.launch { settingsStore.saveProtocol(v) }
-                            }
-                        ) { Text(l, fontSize = 14.sp) }
-                    }
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                listOf("udp" to "UDP", "tcp" to "TCP").forEachIndexed { i, (v, l) ->
+                    val selected = protocol == v
+                    SegmentedButton(
+                        selected = selected,
+                        shape = SegmentedButtonDefaults.itemShape(index = i, count = 2),
+                        icon = { SegmentedSelectionIcon(selected, animateProtocolSelection) },
+                        onClick = {
+                            if (protocol != v) animateProtocolSelection = true
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            scope.launch { settingsStore.saveProtocol(v) }
+                        }
+                    ) { Text(l, fontSize = 14.sp) }
                 }
             }
             Divider(modifier = Modifier.padding(vertical = 16.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text("Размер пакета (MTU)", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                AnimatedContent(targetState = customMtu, label = "") { mtu -> Text(if (mtu == 0) "Авто" else "$mtu", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, fontSize = 16.sp) }
+                AnimatedContent(
+                    targetState = customMtu,
+                    transitionSpec = {
+                        if (animateMtuValue) {
+                            fadeIn(tween(120)) togetherWith fadeOut(tween(90))
+                        } else {
+                            noContentAnimation()
+                        }
+                    },
+                    label = "mtu_value"
+                ) { mtu -> Text(if (mtu == 0) "Авто" else "$mtu", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, fontSize = 16.sp) }
             }
             Slider(
                 value = if (customMtu == 0) 1279f else customMtu.toFloat(),
                 onValueChange = {
                     val v = if (it < 1280f) 0 else it.roundToInt()
-                    if (kotlin.math.abs(v - lastMtu) > 5 || (v == 0 && lastMtu != 0)) { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); lastMtu = v }
+                    if (kotlin.math.abs(v - lastMtu) > 5 || (v == 0 && lastMtu != 0)) { animateMtuValue = true; haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); lastMtu = v }
                     scope.launch { settingsStore.saveCustomMtu(v) }
                 },
                 onValueChangeFinished = { scope.launch { TunnelManager.reloadWireGuard() } }, valueRange = 1279f..1500f
             )
             Text("Меньшее значение может помочь при плохой связи. Оптимально: 1280-1420.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
         }
-        CategoryCard("DNS Сервер", Icons.Default.Dns) {
-            dnsType?.let { currentDns ->
-                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                    listOf("default" to "Авто", "adguard" to "AdGuard", "cloudflare" to "Cloudflare", "custom" to "Свой").forEachIndexed { i, (v, l) ->
-                        val selected = currentDns == v
-                        SegmentedButton(
-                            selected = selected,
-                            shape = SegmentedButtonDefaults.itemShape(index = i, count = 4),
-                            icon = { SegmentedSelectionIcon(selected, animateDnsSelection) },
-                            onClick = {
-                                if (currentDns != v) animateDnsSelection = true
-                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                scope.launch { settingsStore.saveCustomDns(v); TunnelManager.reloadWireGuard() }
-                            }
-                        ) { Text(l, fontSize = 11.sp, maxLines = 1) }
+        CategoryCard("DNS Сервер", Icons.Default.Dns, animateSize = animateDnsSelection) {
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                listOf("default" to "Авто", "adguard" to "AdGuard", "cloudflare" to "Cloudflare", "custom" to "Свой").forEachIndexed { i, (v, l) ->
+                    val selected = dnsType == v
+                    SegmentedButton(
+                        selected = selected,
+                        shape = SegmentedButtonDefaults.itemShape(index = i, count = 4),
+                        icon = { SegmentedSelectionIcon(selected, animateDnsSelection) },
+                        onClick = {
+                            if (dnsType != v) animateDnsSelection = true
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            scope.launch { settingsStore.saveCustomDns(v); TunnelManager.reloadWireGuard() }
+                        }
+                    ) { Text(l, fontSize = 11.sp, maxLines = 1) }
+                }
+            }
+            AnimatedVisibility(
+                visible = dnsType == "custom",
+                enter = if (animateDnsSelection) expandVertically(spring(stiffness = Spring.StiffnessMedium)) + fadeIn() else EnterTransition.None,
+                exit = if (animateDnsSelection) shrinkVertically(spring(stiffness = Spring.StiffnessMedium)) + fadeOut() else ExitTransition.None
+            ) {
+                OutlinedTextField(
+                    value = customDnsIp,
+                    onValueChange = { scope.launch { settingsStore.saveCustomDnsIp(it.trim()) } },
+                    label = { Text("IP адрес DNS сервера") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
+                    shape = RoundedCornerShape(20.dp)
+                )
+            }
+            AnimatedContent(
+                targetState = dnsType,
+                transitionSpec = {
+                    if (animateDnsSelection) {
+                        fadeIn(tween(140, delayMillis = 30)) togetherWith fadeOut(tween(100))
+                    } else {
+                        noContentAnimation()
                     }
-                }
-                AnimatedVisibility(
-                    visible = currentDns == "custom",
-                    enter = if (animateDnsSelection) expandVertically(spring(stiffness = Spring.StiffnessMedium)) + fadeIn() else EnterTransition.None,
-                    exit = if (animateDnsSelection) shrinkVertically(spring(stiffness = Spring.StiffnessMedium)) + fadeOut() else ExitTransition.None
-                ) {
-                    OutlinedTextField(
-                        value = customDnsIp,
-                        onValueChange = { scope.launch { settingsStore.saveCustomDnsIp(it.trim()) } },
-                        label = { Text("IP адрес DNS сервера") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
-                        shape = RoundedCornerShape(20.dp)
-                    )
-                }
-                AnimatedContent(
-                    targetState = currentDns,
-                    label = "dns_description",
-                    modifier = Modifier.padding(top = 12.dp)
-                ) { selectedDns ->
-                    Text(
-                        when (selectedDns) {
-                            "adguard" -> "Блокирует рекламу и трекеры на уровне пакетов."
-                            "cloudflare" -> "Самый быстрый и приватный DNS."
-                            "custom" -> "Впишите IP-адрес предпочитаемого DNS."
-                            else -> "Использовать DNS провайдера или сервера."
-                        },
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 14.sp
-                    )
-                }
+                },
+                label = "dns_description",
+                modifier = Modifier.padding(top = 12.dp)
+            ) { selectedDns ->
+                Text(
+                    when (selectedDns) {
+                        "adguard" -> "Блокирует рекламу и трекеры на уровне пакетов."
+                        "cloudflare" -> "Самый быстрый и приватный DNS."
+                        "custom" -> "Впишите IP-адрес предпочитаемого DNS."
+                        else -> "Использовать DNS провайдера или сервера."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 14.sp
+                )
             }
         }
     }
@@ -969,7 +1005,7 @@ fun PerformanceSettings(onBack: () -> Unit) {
     val haptic = LocalHapticFeedback.current
 
     val workersCount by settingsStore.workersPerHash.collectAsStateWithLifecycle(12)
-    var captchaMethod by remember { mutableStateOf<String?>(null) }
+    val captchaMethod by settingsStore.captchaSolveMethod.collectAsStateWithLifecycle("manual")
     val currentHashesFromStore by settingsStore.vkHashes.collectAsStateWithLifecycle("")
     val wifiHighPerformance by settingsStore.wifiHighPerformance.collectAsStateWithLifecycle(true)
     val keepaliveSeconds by settingsStore.clientKeepaliveSeconds.collectAsStateWithLifecycle(10)
@@ -977,6 +1013,7 @@ fun PerformanceSettings(onBack: () -> Unit) {
     var nextHashFieldId by remember { mutableLongStateOf(1L) }
     var hashFields by remember { mutableStateOf(listOf(VkHashFieldUi(id = 0L, value = ""))) }
     var lastWrittenHashes by remember { mutableStateOf<String?>(null) }
+    var animateHashFields by remember { mutableStateOf(false) }
 
     fun createHashField(value: String): VkHashFieldUi {
         val field = VkHashFieldUi(id = nextHashFieldId, value = value)
@@ -997,11 +1034,13 @@ fun PerformanceSettings(onBack: () -> Unit) {
 
     fun removeHashField(fieldId: Long) {
         if (hashFields.size <= 1) return
+        animateHashFields = true
         setHashFields(hashFields.filterNot { it.id == fieldId })
     }
 
     fun addHashField() {
         if (hashFields.size >= 3 || hashFields.lastOrNull()?.value.isNullOrBlank()) return
+        animateHashFields = true
         setHashFields(hashFields + createHashField(""))
     }
 
@@ -1035,11 +1074,9 @@ fun PerformanceSettings(onBack: () -> Unit) {
     
     var lastWorkerCount by remember(workersCount) { mutableIntStateOf(workersCount) }
     var lastKeepaliveSeconds by remember(keepaliveSeconds) { mutableIntStateOf(keepaliveSeconds) }
+    var animateWorkersCount by remember { mutableStateOf(false) }
+    var animateKeepaliveValue by remember { mutableStateOf(false) }
     var animateCaptchaSelection by remember { mutableStateOf(false) }
-
-    LaunchedEffect(settingsStore) {
-        settingsStore.captchaSolveMethod.collect { captchaMethod = it }
-    }
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         SettingsHeader("Производительность", onBack)
@@ -1056,26 +1093,30 @@ fun PerformanceSettings(onBack: () -> Unit) {
                         AnimatedContent(
                             targetState = slot,
                             transitionSpec = {
-                                (
-                                    fadeIn(
-                                        animationSpec = tween(180, delayMillis = 45, easing = FastOutSlowInEasing)
-                                    ) + slideInVertically(
-                                        animationSpec = tween(VK_HASH_ROW_ANIMATION_MS, easing = FastOutSlowInEasing)
-                                    ) { it / 10 } + scaleIn(
-                                        animationSpec = tween(VK_HASH_ROW_ANIMATION_MS, easing = FastOutSlowInEasing),
-                                        initialScale = 0.985f
-                                    )
-                                ) togetherWith (
-                                    fadeOut(
-                                        animationSpec = tween(140, easing = FastOutSlowInEasing)
-                                    ) + slideOutVertically(
-                                        animationSpec = tween(220, easing = FastOutSlowInEasing)
-                                    ) { -it / 12 } + scaleOut(
-                                        animationSpec = tween(180, easing = FastOutSlowInEasing),
-                                        targetScale = 0.985f
-                                    )
-                                ) using SizeTransform(clip = false) { _, _ ->
-                                    tween(VK_HASH_ROW_ANIMATION_MS, easing = FastOutSlowInEasing)
+                                if (animateHashFields) {
+                                    (
+                                        fadeIn(
+                                            animationSpec = tween(180, delayMillis = 45, easing = FastOutSlowInEasing)
+                                        ) + slideInVertically(
+                                            animationSpec = tween(VK_HASH_ROW_ANIMATION_MS, easing = FastOutSlowInEasing)
+                                        ) { it / 10 } + scaleIn(
+                                            animationSpec = tween(VK_HASH_ROW_ANIMATION_MS, easing = FastOutSlowInEasing),
+                                            initialScale = 0.985f
+                                        )
+                                    ) togetherWith (
+                                        fadeOut(
+                                            animationSpec = tween(140, easing = FastOutSlowInEasing)
+                                        ) + slideOutVertically(
+                                            animationSpec = tween(220, easing = FastOutSlowInEasing)
+                                        ) { -it / 12 } + scaleOut(
+                                            animationSpec = tween(180, easing = FastOutSlowInEasing),
+                                            targetScale = 0.985f
+                                        )
+                                    ) using SizeTransform(clip = false) { _, _ ->
+                                        tween(VK_HASH_ROW_ANIMATION_MS, easing = FastOutSlowInEasing)
+                                    }
+                                } else {
+                                    noContentAnimation()
                                 }
                             },
                             contentKey = { it.contentKey },
@@ -1086,6 +1127,7 @@ fun PerformanceSettings(onBack: () -> Unit) {
                                 fieldCount = hashFields.size,
                                 canAddHashField = canAddHashField,
                                 canEditHashFields = true,
+                                animateInteractions = animateHashFields,
                                 onValueChange = { fieldId, value ->
                                     setHashFields(
                                         hashFields.map {
@@ -1101,21 +1143,35 @@ fun PerformanceSettings(onBack: () -> Unit) {
                 }
             }
         }
-        CategoryCard("Нагрузка", Icons.Default.Memory) {
+        CategoryCard("Нагрузка", Icons.Default.Memory, animateSize = animateWorkersCount) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text("Потоки обработки", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                AnimatedContent(targetState = workersCount, label = "") { wc -> Text("$wc", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, fontSize = 16.sp) }
+                AnimatedContent(
+                    targetState = workersCount,
+                    transitionSpec = {
+                        if (animateWorkersCount) {
+                            fadeIn(tween(120)) togetherWith fadeOut(tween(90))
+                        } else {
+                            noContentAnimation()
+                        }
+                    },
+                    label = "workers_count_value"
+                ) { wc -> Text("$wc", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, fontSize = 16.sp) }
             }
             Slider(
                 value = workersCount.toFloat(),
                 onValueChange = {
                     val clamped = it.roundToInt().coerceIn(1, 72)
-                    if (clamped != lastWorkerCount) { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); lastWorkerCount = clamped }
+                    if (clamped != lastWorkerCount) { animateWorkersCount = true; haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); lastWorkerCount = clamped }
                     scope.launch { settingsStore.saveWorkersPerHash(clamped) }
                 },
                 valueRange = 1f..72f
             )
-            AnimatedVisibility(visible = workersCount < 12) {
+            AnimatedVisibility(
+                visible = workersCount < 12,
+                enter = if (animateWorkersCount) fadeIn(tween(140)) + expandVertically(tween(180, easing = FastOutSlowInEasing)) else EnterTransition.None,
+                exit = if (animateWorkersCount) fadeOut(tween(100)) + shrinkVertically(tween(160, easing = FastOutSlowInEasing)) else ExitTransition.None
+            ) {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -1149,13 +1205,23 @@ fun PerformanceSettings(onBack: () -> Unit) {
             Divider(modifier = Modifier.padding(vertical = 16.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text("Keepalive клиента", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                AnimatedContent(targetState = keepaliveSeconds, label = "") { seconds -> Text("$seconds сек", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, fontSize = 16.sp) }
+                AnimatedContent(
+                    targetState = keepaliveSeconds,
+                    transitionSpec = {
+                        if (animateKeepaliveValue) {
+                            fadeIn(tween(120)) togetherWith fadeOut(tween(90))
+                        } else {
+                            noContentAnimation()
+                        }
+                    },
+                    label = "keepalive_value"
+                ) { seconds -> Text("$seconds сек", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, fontSize = 16.sp) }
             }
             Slider(
                 value = keepaliveSeconds.toFloat(),
                 onValueChange = {
                     val seconds = it.roundToInt().coerceIn(5, 60)
-                    if (seconds != lastKeepaliveSeconds) { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); lastKeepaliveSeconds = seconds }
+                    if (seconds != lastKeepaliveSeconds) { animateKeepaliveValue = true; haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); lastKeepaliveSeconds = seconds }
                     scope.launch { settingsStore.saveClientKeepaliveSeconds(seconds) }
                 },
                 valueRange = 5f..60f
@@ -1163,21 +1229,19 @@ fun PerformanceSettings(onBack: () -> Unit) {
             Text("Больше интервал — меньше фоновой активности. Если соединение начинает засыпать, верни 10 секунд.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
         }
         CategoryCard("Решение капчи", Icons.Default.SmartToy) {
-            captchaMethod?.let { currentCaptchaMethod ->
-                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                    captchaMethodOptions.forEachIndexed { i, (v, l) ->
-                        val selected = currentCaptchaMethod == v || (currentCaptchaMethod == "auto" && v == "rjs_classic")
-                        SegmentedButton(
-                            selected = selected,
-                            shape = SegmentedButtonDefaults.itemShape(index = i, count = captchaMethodOptions.size),
-                            icon = { SegmentedSelectionIcon(selected, animateCaptchaSelection) },
-                            onClick = {
-                                if (!selected) animateCaptchaSelection = true
-                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                scope.launch { settingsStore.saveCaptchaMode(captchaModeForMethod(v)); settingsStore.saveCaptchaSolveMethod(v) }
-                            }
-                        ) { Text(l, fontSize = 14.sp) }
-                    }
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                captchaMethodOptions.forEachIndexed { i, (v, l) ->
+                    val selected = captchaMethod == v || (captchaMethod == "auto" && v == "rjs_classic")
+                    SegmentedButton(
+                        selected = selected,
+                        shape = SegmentedButtonDefaults.itemShape(index = i, count = captchaMethodOptions.size),
+                        icon = { SegmentedSelectionIcon(selected, animateCaptchaSelection) },
+                        onClick = {
+                            if (!selected) animateCaptchaSelection = true
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            scope.launch { settingsStore.saveCaptchaMode(captchaModeForMethod(v)); settingsStore.saveCaptchaSolveMethod(v) }
+                        }
+                    ) { Text(l, fontSize = 14.sp) }
                 }
             }
         }
@@ -1192,37 +1256,28 @@ fun InterfaceSettings(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
 
-    var themeMode by remember { mutableStateOf<String?>(null) }
+    val themeMode by settingsStore.themeMode.collectAsStateWithLifecycle("system")
     val dynamicColor by settingsStore.useDynamicColor.collectAsStateWithLifecycle(true)
     var animateThemeSelection by remember { mutableStateOf(false) }
-
-    LaunchedEffect(settingsStore) {
-        settingsStore.themeMode.collect { themeMode = it }
-    }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         SettingsHeader("Интерфейс", onBack)
         CategoryCard("Внешний вид", Icons.Default.Palette, animateSize = false) {
             Text("Тема оформления", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, fontSize = 16.sp)
             Spacer(Modifier.height(12.dp))
-            if (themeMode == null) {
-                Spacer(Modifier.fillMaxWidth().height(40.dp))
-            } else {
-                val currentThemeMode = themeMode ?: "system"
-                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                    listOf("system" to "Авто", "light" to "Светлая", "dark" to "Темная", "amoled" to "Amoled").forEachIndexed { i, (v, l) ->
-                        val selected = currentThemeMode == v
-                        SegmentedButton(
-                            selected = selected,
-                            shape = SegmentedButtonDefaults.itemShape(index = i, count = 4),
-                            icon = { SegmentedSelectionIcon(selected, animateThemeSelection) },
-                            onClick = {
-                                if (currentThemeMode != v) animateThemeSelection = true
-                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                scope.launch { settingsStore.saveThemeMode(v) }
-                            }
-                        ) { Text(l, fontSize = 12.sp, maxLines = 1) }
-                    }
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                listOf("system" to "Авто", "light" to "Светлая", "dark" to "Темная", "amoled" to "Amoled").forEachIndexed { i, (v, l) ->
+                    val selected = themeMode == v
+                    SegmentedButton(
+                        selected = selected,
+                        shape = SegmentedButtonDefaults.itemShape(index = i, count = 4),
+                        icon = { SegmentedSelectionIcon(selected, animateThemeSelection) },
+                        onClick = {
+                            if (themeMode != v) animateThemeSelection = true
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            scope.launch { settingsStore.saveThemeMode(v) }
+                        }
+                    ) { Text(l, fontSize = 12.sp, maxLines = 1) }
                 }
             }
             Divider(modifier = Modifier.padding(vertical = 16.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
