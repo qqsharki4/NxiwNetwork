@@ -1084,7 +1084,21 @@ fun StretchyNavigationBar(
                                         }
                                     }
                                 ) {
-                                    Icon(if (selected) item.selectedIcon else item.unselectedIcon, contentDescription = item.label, tint = iconColor, modifier = Modifier.size(24.dp))
+                                    AnimatedContent(
+                                        targetState = selected,
+                                        transitionSpec = {
+                                            fadeIn(tween(120, delayMillis = 30)) togetherWith
+                                                fadeOut(tween(90))
+                                        },
+                                        label = "nav_icon_${item.label}"
+                                    ) { isSelected ->
+                                        Icon(
+                                            if (isSelected) item.selectedIcon else item.unselectedIcon,
+                                            contentDescription = item.label,
+                                            tint = iconColor,
+                                            modifier = Modifier.size(24.dp)
+                                        )
+                                    }
                                 }
                             }
                             Spacer(modifier = Modifier.height(4.dp))

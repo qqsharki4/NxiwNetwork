@@ -624,6 +624,7 @@ fun UpdatesSettings(onBack: () -> Unit) {
     var showChangelogDialog by remember { mutableStateOf(false) }
     var dialogUpdate by remember { mutableStateOf<AvailableUpdate?>(null) }
     var nowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    var animateUpdateChanges by remember { mutableStateOf(false) }
     val rateLimitAlert = formatRateLimitAlert(updateRateLimitUntil, nowMillis)
 
     LaunchedEffect(Unit) {
@@ -647,6 +648,7 @@ fun UpdatesSettings(onBack: () -> Unit) {
                         shape = SegmentedButtonDefaults.itemShape(index = index, count = 3),
                         onClick = {
                             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            animateUpdateChanges = true
                             scope.launch { settingsStore.saveUpdateChannel(value) }
                         }
                     ) {
@@ -655,8 +657,22 @@ fun UpdatesSettings(onBack: () -> Unit) {
                 }
             }
             Spacer(Modifier.height(16.dp))
-            AnimatedVisibility(visible = selected != "dev") {
-                AnimatedContent(targetState = selected, label = "update_channel_description") { channel ->
+            AnimatedVisibility(
+                visible = selected != "dev",
+                enter = if (animateUpdateChanges) fadeIn(tween(140)) + expandVertically(tween(180, easing = FastOutSlowInEasing)) else EnterTransition.None,
+                exit = if (animateUpdateChanges) fadeOut(tween(100)) + shrinkVertically(tween(160, easing = FastOutSlowInEasing)) else ExitTransition.None
+            ) {
+                AnimatedContent(
+                    targetState = selected,
+                    transitionSpec = {
+                        if (animateUpdateChanges) {
+                            fadeIn(tween(140, delayMillis = 30)) togetherWith fadeOut(tween(100))
+                        } else {
+                            EnterTransition.None togetherWith ExitTransition.None
+                        }
+                    },
+                    label = "update_channel_description"
+                ) { channel ->
                     Text(
                         updateChannelDescription(channel),
                         style = MaterialTheme.typography.bodyMedium,
@@ -665,7 +681,11 @@ fun UpdatesSettings(onBack: () -> Unit) {
                     )
                 }
             }
-            AnimatedVisibility(visible = selected == "dev") {
+            AnimatedVisibility(
+                visible = selected == "dev",
+                enter = if (animateUpdateChanges) fadeIn(tween(140)) + expandVertically(tween(180, easing = FastOutSlowInEasing)) else EnterTransition.None,
+                exit = if (animateUpdateChanges) fadeOut(tween(100)) + shrinkVertically(tween(160, easing = FastOutSlowInEasing)) else ExitTransition.None
+            ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
@@ -708,6 +728,7 @@ fun UpdatesSettings(onBack: () -> Unit) {
             Button(
                 onClick = {
                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    animateUpdateChanges = true
                     UpdateCheckCoordinator.requestManualCheck(context, settingsStore, selected)
                 },
                 modifier = Modifier.fillMaxWidth().height(54.dp),
@@ -739,11 +760,15 @@ fun UpdatesSettings(onBack: () -> Unit) {
             AnimatedContent(
                 targetState = displayedUpdates,
                 transitionSpec = {
-                    fadeIn(animationSpec = tween(durationMillis = 160, delayMillis = 40)) togetherWith
-                        fadeOut(animationSpec = tween(durationMillis = 120)) using
-                        SizeTransform(clip = false) { _, _ ->
-                            tween(durationMillis = 220, easing = FastOutSlowInEasing)
-                        }
+                    if (animateUpdateChanges) {
+                        fadeIn(animationSpec = tween(durationMillis = 160, delayMillis = 40)) togetherWith
+                            fadeOut(animationSpec = tween(durationMillis = 120)) using
+                            SizeTransform(clip = false) { _, _ ->
+                                tween(durationMillis = 220, easing = FastOutSlowInEasing)
+                            }
+                    } else {
+                        EnterTransition.None togetherWith ExitTransition.None
+                    }
                 },
                 label = "available_updates_content"
             ) { updates ->
