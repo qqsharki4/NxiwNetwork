@@ -47,11 +47,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -68,6 +70,7 @@ import com.nxiwnetwork.client.ui.ExceptionsTab
 import com.nxiwnetwork.client.ui.ChangelogDialog
 import com.nxiwnetwork.client.ui.InfoTab
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -79,8 +82,8 @@ import java.security.MessageDigest
 import java.util.UUID
 import kotlin.math.absoluteValue
 
-private const val UPDATE_REMIND_LATER_MS = 12L * 60L * 60L * 1000L
-private const val AUTO_UPDATE_CHECK_INTERVAL_MS = 12L * 60L * 60L * 1000L
+private const val UPDATE_REMIND_LATER_MS = 24L * 60L * 60L * 1000L
+private const val AUTO_UPDATE_CHECK_INTERVAL_MS = 3L * 60L * 60L * 1000L
 
 class MainActivity : ComponentActivity() {
 
@@ -157,47 +160,99 @@ class MainActivity : ComponentActivity() {
             val dynamicColor by settingsStore.useDynamicColor.collectAsStateWithLifecycle(true)
             var showOnboarding by remember { mutableStateOf(isFirstLaunch) }
             var showStartupChangelog by remember { mutableStateOf(false) }
+            var startupChangelogMarkdown by remember { mutableStateOf<String?>(null) }
             var pendingUpdate by remember { mutableStateOf<AvailableUpdate?>(null) }
             var pendingUpdateChannel by remember { mutableStateOf("stable") }
             var startupUpdateChecked by remember { mutableStateOf(false) }
+            val downloadState by UpdateCheckCoordinator.downloadState.collectAsStateWithLifecycle()
+            val currentAppVersionName = remember { readCurrentAppVersionName() }
 
             LaunchedEffect(showOnboarding) {
                 if (showOnboarding) return@LaunchedEffect
 
+                val previousVersionName = settingsStore.getLastInstalledVersion(startupChangelogChannel).ifBlank { null }
                 val lastSeenKey = settingsStore.getStartupChangelogSeenKey(startupChangelogChannel)
-                showStartupChangelog = lastSeenKey != startupChangelogKey
+                startupChangelogMarkdown = buildStartupChangelogMarkdown(previousVersionName, currentAppVersionName)
+                showStartupChangelog = lastSeenKey != startupChangelogKey && !startupChangelogMarkdown.isNullOrBlank()
+                settingsStore.saveLastInstalledVersion(startupChangelogChannel, currentAppVersionName)
                 if (startupUpdateChecked) return@LaunchedEffect
                 startupUpdateChecked = true
 
-                val normalizedChannel = normalizeUpdateChannelId(settingsStore.updateChannel.first())
-                pendingUpdateChannel = normalizedChannel
-                val now = System.currentTimeMillis()
-                val lastCheckAt = settingsStore.updateLastCheckAt.first()
-                if (lastCheckAt > 0L && now - lastCheckAt < AUTO_UPDATE_CHECK_INTERVAL_MS) {
-                    return@LaunchedEffect
+                var hasCachedUpdateResult = settingsStore.hasCachedAvailableUpdates()
+                val rawCachedUpdates = settingsStore.getCachedAvailableUpdates()
+                val cachedUpdates = ReleaseUpdater.filterNewerThanInstalled(this@MainActivity, rawCachedUpdates)
+                if (cachedUpdates.size != rawCachedUpdates.size) {
+                    settingsStore.saveCachedAvailableUpdates(cachedUpdates)
+                    if (cachedUpdates.isEmpty()) settingsStore.saveUpdateStatus("Обновлений нет")
                 }
+                UpdateCheckCoordinator.setAvailableUpdates(cachedUpdates)
+                var canShowStartupUpdateDialog = true
+                var lastAutomaticCheckAt = settingsStore.updateLastCheckAt.first()
+                while (true) {
+                    val normalizedChannel = normalizeUpdateChannelId(settingsStore.updateChannel.first())
+                    pendingUpdateChannel = normalizedChannel
+                    val now = System.currentTimeMillis()
+                    val currentUpdates = UpdateCheckCoordinator.availableUpdates.value
+                    val skippedTagForStartup = settingsStore.getSkippedUpdateTag(normalizedChannel).ifBlank { null }
+                    val visibleCachedUpdates = currentUpdates.filter { ReleaseUpdater.updateMatchesChannel(it, normalizedChannel) }
+                    val cachedDialogUpdate = visibleCachedUpdates
+                        .firstOrNull { it.tagName != skippedTagForStartup }
 
-                val laterUntil = settingsStore.getUpdateLaterUntil(normalizedChannel)
-                if (now < laterUntil) {
-                    return@LaunchedEffect
-                }
-
-                val skippedTag = settingsStore.getSkippedUpdateTag(normalizedChannel).ifBlank { null }
-                val updateResult = runCatching {
-                    ReleaseUpdater.checkForUpdate(this@MainActivity, normalizedChannel, skippedTag)
-                }
-                pendingUpdate = updateResult.getOrNull()
-                updateResult.fold(
-                    onSuccess = { update ->
-                        settingsStore.saveUpdateRateLimitUntil(0L)
-                        settingsStore.saveUpdateCheckStatus(update?.let { "Доступна версия ${it.tagName}" } ?: "Обновлений нет")
-                    },
-                    onFailure = { error ->
-                        (error as? GitHubRateLimitException)
-                            ?.let { settingsStore.saveUpdateRateLimitUntil(it.resetAtMillis ?: fallbackRateLimitUntil()) }
-                        settingsStore.saveUpdateStatus(ReleaseUpdater.describeCheckFailure(error))
+                    if (
+                        canShowStartupUpdateDialog &&
+                        pendingUpdate == null &&
+                        cachedDialogUpdate != null &&
+                        now >= settingsStore.getUpdateLaterUntil(normalizedChannel)
+                    ) {
+                        pendingUpdate = cachedDialogUpdate
                     }
-                )
+
+                    if (
+                        !hasCachedUpdateResult ||
+                        lastAutomaticCheckAt <= 0L ||
+                        now - lastAutomaticCheckAt >= AUTO_UPDATE_CHECK_INTERVAL_MS
+                    ) {
+                        val allowDialogForThisCheck = canShowStartupUpdateDialog
+                        lastAutomaticCheckAt = now
+                        val skippedTag = skippedTagForStartup
+                        val updateResult = runCatching {
+                            ReleaseUpdater.checkForUpdates(this@MainActivity, "dev")
+                        }
+                        updateResult.fold(
+                            onSuccess = { updates ->
+                                val visibleUpdates = updates
+                                    .filter { ReleaseUpdater.updateMatchesChannel(it, normalizedChannel) }
+                                val latestUpdate = visibleUpdates.firstOrNull()
+                                val startupDialogUpdate = visibleUpdates.firstOrNull { it.tagName != skippedTag }
+                                settingsStore.saveUpdateRateLimitUntil(0L)
+                                settingsStore.saveUpdateCheckStatus(latestUpdate?.let { "Доступна версия ${it.tagName}" } ?: "Обновлений нет")
+                                settingsStore.saveCachedAvailableUpdates(updates)
+                                hasCachedUpdateResult = true
+                                UpdateCheckCoordinator.setAvailableUpdates(updates)
+                                if (
+                                    allowDialogForThisCheck &&
+                                    startupDialogUpdate != null &&
+                                    now >= settingsStore.getUpdateLaterUntil(normalizedChannel)
+                                ) {
+                                    pendingUpdate = startupDialogUpdate
+                                }
+                            },
+                            onFailure = { error ->
+                                val rateLimit = error as? GitHubRateLimitException
+                                if (rateLimit != null) {
+                                    settingsStore.saveUpdateRateLimitUntil(rateLimit.resetAtMillis ?: fallbackRateLimitUntil())
+                                } else {
+                                    settingsStore.saveUpdateRateLimitUntil(0L)
+                                }
+                                settingsStore.saveUpdateStatus(ReleaseUpdater.describeCheckFailure(error))
+                            }
+                        )
+                    }
+                    canShowStartupUpdateDialog = false
+
+                    val elapsedSinceCheck = (System.currentTimeMillis() - lastAutomaticCheckAt).coerceAtLeast(0L)
+                    delay((AUTO_UPDATE_CHECK_INTERVAL_MS - elapsedSinceCheck).coerceAtLeast(60_000L))
+                }
             }
 
             NxiwTheme(themeMode = themeMode, dynamicColor = dynamicColor) {
@@ -216,7 +271,7 @@ class MainActivity : ComponentActivity() {
                     }
 
                     if (showStartupChangelog && pendingImportConfig.value == null) {
-                        ChangelogDialog {
+                        ChangelogDialog(markdownOverride = startupChangelogMarkdown) {
                             showStartupChangelog = false
                             lifecycleScope.launch {
                                 settingsStore.saveStartupChangelogSeenKey(startupChangelogChannel, startupChangelogKey)
@@ -246,6 +301,9 @@ class MainActivity : ComponentActivity() {
                         if (!showOnboarding && !showStartupChangelog && pendingImportConfig.value == null) {
                             UpdateAvailableDialog(
                                 update = update,
+                                currentVersionName = currentAppVersionName,
+                                isDownloaded = ReleaseUpdater.isUpdateDownloaded(this@MainActivity, update),
+                                downloadState = downloadState,
                                 onClose = {
                                     pendingUpdate = null
                                 },
@@ -271,9 +329,13 @@ class MainActivity : ComponentActivity() {
                                 onDownload = {
                                     lifecycleScope.launch {
                                         settingsStore.saveRemoteChangelogSeenKey(pendingUpdateChannel, buildRemoteChangelogSeenKey(update))
-                                        downloadAndInstallUpdate(settingsStore, update)
+                                        downloadUpdate(settingsStore, update)
                                     }
-                                    pendingUpdate = null
+                                },
+                                onInstall = {
+                                    lifecycleScope.launch {
+                                        installDownloadedUpdate(update)
+                                    }
                                 }
                             )
                         }
@@ -289,37 +351,54 @@ class MainActivity : ComponentActivity() {
         handleIntents(intent, SettingsStore(this))
     }
 
-    private suspend fun downloadAndInstallUpdate(settingsStore: SettingsStore, update: AvailableUpdate) {
+    private suspend fun downloadUpdate(settingsStore: SettingsStore, update: AvailableUpdate) {
+        settingsStore.saveUpdateStatus("Скачиваем ${update.tagName}...")
+        UpdateCheckCoordinator.setDownloadProgress(update.tagName, 0, "Скачано 0%")
+        val result = runCatching {
+            ReleaseUpdater.downloadUpdateFile(this, update) { progress ->
+                val percent = progress ?: 0
+                UpdateCheckCoordinator.setDownloadProgress(
+                    tagName = update.tagName,
+                    progressPercent = percent,
+                    message = "Скачано $percent%"
+                )
+            }
+        }
+        settingsStore.saveUpdateStatus(
+            if (result.isSuccess) "APK ${update.tagName} скачан" else "Ошибка скачивания ${update.tagName}"
+        )
+        UpdateCheckCoordinator.finishDownload(
+            update.tagName,
+            if (result.isSuccess) "APK скачан" else "Ошибка скачивания"
+        )
+    }
+
+    private suspend fun installDownloadedUpdate(update: AvailableUpdate) {
+        if (!ReleaseUpdater.isUpdateDownloaded(this, update)) {
+            return
+        }
         if (!ReleaseUpdater.canInstallDownloadedApks(this)) {
-            settingsStore.saveUpdateStatus("Нужно разрешить установку APK")
-            Toast.makeText(this, "Разреши установку APK для NxiwNetwork", Toast.LENGTH_LONG).show()
             ReleaseUpdater.openInstallPermissionSettings(this)
             return
         }
 
-        settingsStore.saveUpdateStatus("Скачиваем ${update.tagName}...")
-        val result = runCatching {
-            val apkFile = ReleaseUpdater.downloadUpdateFile(this, update)
-            ReleaseUpdater.installDownloadedApk(this, apkFile)
+        runCatching {
+            ReleaseUpdater.installDownloadedApk(this, ReleaseUpdater.downloadedUpdateFile(this, update))
         }
-        settingsStore.saveUpdateStatus(
-            if (result.isSuccess) "Открыт установщик ${update.tagName}" else "Ошибка скачивания ${update.tagName}"
-        )
-        Toast.makeText(
-            this,
-            if (result.isSuccess) "Открываю установку обновления" else "Не удалось скачать обновление",
-            Toast.LENGTH_SHORT
-        ).show()
     }
 
-    private fun readCurrentAppChannelKey(): String {
+    private fun readCurrentAppVersionName(): String {
         val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             packageManager.getPackageInfo(packageName, PackageManager.PackageInfoFlags.of(0))
         } else {
             @Suppress("DEPRECATION")
             packageManager.getPackageInfo(packageName, 0)
         }
-        return parseUpdateChannel(packageInfo.versionName ?: "0.0.0").name.lowercase()
+        return packageInfo.versionName ?: "unknown"
+    }
+
+    private fun readCurrentAppChannelKey(): String {
+        return parseUpdateChannel(readCurrentAppVersionName()).name.lowercase()
     }
 
     private fun normalizeUpdateChannelId(channel: String): String {
@@ -333,6 +412,13 @@ class MainActivity : ComponentActivity() {
         val digest = MessageDigest.getInstance("SHA-256")
         val hash = digest.digest(update.body.toByteArray()).joinToString("") { "%02x".format(it) }
         return "${update.tagName}:$hash"
+    }
+
+    private fun buildStartupChangelogMarkdown(previousVersionName: String?, currentVersionName: String): String {
+        return runCatching {
+            val changelog = assets.open("CHANGELOG.md").bufferedReader().use { it.readText() }
+            filterChangelogForUpdateRange(changelog, previousVersionName, currentVersionName)
+        }.getOrDefault("")
     }
 
     private fun buildChangelogSeenKey(): String {
@@ -566,14 +652,31 @@ private fun parseImportNodeConfig(json: JSONObject): ImportNodeConfig {
 @Composable
 fun UpdateAvailableDialog(
     update: AvailableUpdate,
+    currentVersionName: String,
+    isDownloaded: Boolean,
+    downloadState: UpdateDownloadState?,
     onClose: () -> Unit,
     onLater: () -> Unit,
     onSkip: () -> Unit,
-    onDownload: () -> Unit
+    onDownload: () -> Unit,
+    onInstall: () -> Unit
 ) {
+    val activeDownload = downloadState?.takeIf { it.tagName == update.tagName }
+    val isDownloading = activeDownload?.isActive == true
+    val shownProgress = activeDownload?.progressPercent ?: if (isDownloaded) 100 else 0
+    val shownProgressMessage = activeDownload?.message ?: if (isDownloaded) "APK скачан" else "Скачано 0%"
+    val dialogMaxHeight = (LocalConfiguration.current.screenHeightDp.dp - 48.dp).coerceAtLeast(360.dp)
     Dialog(onDismissRequest = onClose) {
-        Surface(shape = RoundedCornerShape(32.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
-            Column(modifier = Modifier.padding(28.dp)) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .widthIn(max = 560.dp)
+                .heightIn(max = dialogMaxHeight)
+                .animateContentSize(animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing)),
+            shape = RoundedCornerShape(32.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerHigh
+        ) {
+            Column(modifier = Modifier.padding(24.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
                         modifier = Modifier.size(52.dp).background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
@@ -584,57 +687,108 @@ fun UpdateAvailableDialog(
                     Spacer(Modifier.width(16.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text("Доступно обновление", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                        Text(update.tagName, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                currentVersionName,
+                                style = MaterialTheme.typography.bodySmall.copy(textDecoration = TextDecoration.LineThrough),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+                                fontSize = 12.sp,
+                                maxLines = 1
+                            )
+                            Text(
+                                "  →  ",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                update.tagName,
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
                 }
 
                 Spacer(Modifier.height(18.dp))
 
-                Surface(shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerHighest) {
-                    Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
-                        Text(update.releaseName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                        Spacer(Modifier.height(6.dp))
-                        Text(
-                            "Будет скачан файл: ${update.asset.name}",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            lineHeight = 20.sp
-                        )
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            "Changelog: ${update.changelogAsset?.name ?: "не прикреплен"}",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            lineHeight = 20.sp
-                        )
+                Column(
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Surface(
+                        modifier = Modifier.animateContentSize(animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing)),
+                        shape = RoundedCornerShape(18.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHighest
+                    ) {
+                        Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+                            Text(update.releaseName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                formatUpdatePublishedAgo(update.publishedAtMillis),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                lineHeight = 20.sp
+                            )
+                            Column(modifier = Modifier.padding(top = 12.dp)) {
+                                if (activeDownload?.progressPercent == null && activeDownload != null) {
+                                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                                } else {
+                                    LinearProgressIndicator(
+                                        progress = { shownProgress.coerceIn(0, 100) / 100f },
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+                                Spacer(Modifier.height(8.dp))
+                                Text(
+                                    shownProgressMessage,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
                     }
+
+                    Spacer(Modifier.height(18.dp))
+
+                    Text("Что изменилось", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(10.dp))
+                    ReleaseNotesContent(update.body.ifBlank { "- Нет чейнджлога к этому обновлению." })
                 }
 
-                Spacer(Modifier.height(18.dp))
-
-                Text("Что изменилось", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(10.dp))
-                Column(modifier = Modifier.heightIn(max = 280.dp).verticalScroll(rememberScrollState())) {
-                    ReleaseNotesContent(update.body.ifBlank { "- Автор релиза не добавил changelog." })
-                }
-
-                Spacer(Modifier.height(24.dp))
+                Spacer(Modifier.height(20.dp))
 
                 Button(
-                    onClick = onDownload,
+                    onClick = if (isDownloaded && !isDownloading) onInstall else onDownload,
+                    enabled = !isDownloading,
                     modifier = Modifier.fillMaxWidth().height(56.dp),
                     shape = RoundedCornerShape(24.dp)
                 ) {
-                    Icon(Icons.Default.Download, null, modifier = Modifier.size(20.dp))
+                    Icon(
+                        if (isDownloaded) Icons.Default.InstallMobile else Icons.Default.Download,
+                        null,
+                        modifier = Modifier.size(20.dp)
+                    )
                     Spacer(Modifier.width(8.dp))
-                    Text("Скачать", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Text(
+                        when {
+                            isDownloading -> "Скачиваем..."
+                            isDownloaded -> "Установить"
+                            else -> "Скачать"
+                        },
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp
+                    )
                 }
                 Spacer(Modifier.height(10.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    TextButton(onClick = onClose, modifier = Modifier.weight(1f)) { Text("Закрыть") }
-                    TextButton(onClick = onLater, modifier = Modifier.weight(1f)) { Text("Позже") }
+                    TextButton(onClick = onClose, modifier = Modifier.weight(1f)) { Text("Закрыть", maxLines = 1) }
+                    TextButton(onClick = onLater, modifier = Modifier.weight(1f)) { Text("Позже", maxLines = 1) }
                 }
-                TextButton(onClick = onSkip, modifier = Modifier.fillMaxWidth()) { Text("Пропустить обновление") }
+                TextButton(onClick = onSkip, modifier = Modifier.fillMaxWidth()) { Text("Пропустить обновление", maxLines = 1) }
             }
         }
     }
@@ -795,7 +949,7 @@ val navItems = listOf(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun MainScreen() {
+fun MainScreen(onPageChanged: (Int) -> Unit = {}) {
     val haptic = LocalHapticFeedback.current
     val scope = rememberCoroutineScope()
     val pagerState = rememberPagerState(pageCount = { navItems.size })
@@ -804,6 +958,7 @@ fun MainScreen() {
     val snackbarHostState = remember { SnackbarHostState() }
 
     LaunchedEffect(pagerState.currentPage) {
+        onPageChanged(pagerState.currentPage)
         if (pagerState.currentPage == 3) TunnelManager.clearUnreadErrors()
     }
 

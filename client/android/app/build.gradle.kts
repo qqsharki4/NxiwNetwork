@@ -28,8 +28,8 @@ android {
         applicationId = "com.nxiwnetwork.client"
         minSdk = 29
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.1.0-dev.1"
+        versionCode = 2
+        versionName = "1.1.0-dev.2"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")

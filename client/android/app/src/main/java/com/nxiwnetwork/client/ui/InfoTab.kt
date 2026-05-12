@@ -39,6 +39,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -53,6 +54,8 @@ import com.nxiwnetwork.client.SettingsStore
 import com.nxiwnetwork.client.TunnelManager
 import com.nxiwnetwork.client.UpdateAvailableDialog
 import com.nxiwnetwork.client.UpdateCheckCoordinator
+import com.nxiwnetwork.client.UpdateDownloadState
+import com.nxiwnetwork.client.formatUpdatePublishedAgo
 import com.nxiwnetwork.client.normalizeVkHashFieldEdit
 import com.nxiwnetwork.client.normalizeVkHashInput
 import com.nxiwnetwork.client.normalizeVkHashList
@@ -68,9 +71,9 @@ import java.security.MessageDigest
 import java.util.UUID
 import kotlin.math.roundToInt
 
-private const val UPDATE_REMIND_LATER_MS = 12L * 60L * 60L * 1000L
 private const val VK_HASH_ROW_ANIMATION_MS = 300
 private const val VK_HASH_TRASH_ANIMATION_MS = 320
+private const val UPDATE_REMIND_LATER_MS = 24L * 60L * 60L * 1000L
 
 private data class VkHashFieldUi(
     val id: Long,
@@ -466,43 +469,130 @@ private fun buildRemoteChangelogSeenKey(update: AvailableUpdate): String {
     return "${update.tagName}:$hash"
 }
 
-private suspend fun downloadAndInstallUpdate(
+private suspend fun downloadUpdate(
     context: Context,
     settingsStore: SettingsStore,
     channel: String,
     update: AvailableUpdate
 ) {
-    if (!ReleaseUpdater.canInstallDownloadedApks(context)) {
-        settingsStore.saveUpdateStatus("Нужно разрешить установку APK")
-        withContext(Dispatchers.Main) {
-            Toast.makeText(context, "Разреши установку APK для NxiwNetwork", Toast.LENGTH_LONG).show()
-            ReleaseUpdater.openInstallPermissionSettings(context)
-        }
-        return
-    }
-
     settingsStore.saveUpdateStatus("Скачиваем ${update.tagName}...")
+    UpdateCheckCoordinator.setDownloadProgress(update.tagName, 0, "Скачано 0%")
     val result = runCatching {
-        val apkFile = ReleaseUpdater.downloadUpdateFile(context, update)
-        withContext(Dispatchers.Main) {
-            ReleaseUpdater.installDownloadedApk(context, apkFile)
+        ReleaseUpdater.downloadUpdateFile(context, update) { progress ->
+            val percent = progress ?: 0
+            UpdateCheckCoordinator.setDownloadProgress(
+                tagName = update.tagName,
+                progressPercent = percent,
+                message = "Скачано $percent%"
+            )
         }
     }
 
     settingsStore.saveUpdateStatus(
-        if (result.isSuccess) "Открыт установщик ${update.tagName}" else "Ошибка скачивания ${update.tagName}"
+        if (result.isSuccess) "APK ${update.tagName} скачан" else "Ошибка скачивания ${update.tagName}"
+    )
+    UpdateCheckCoordinator.finishDownload(
+        update.tagName,
+        if (result.isSuccess) "APK скачан" else "Ошибка скачивания"
     )
     if (result.isSuccess) {
         settingsStore.saveUpdateLaterUntil(channel, 0L)
         settingsStore.saveSkippedUpdateTag(channel, "")
     }
+}
 
-    withContext(Dispatchers.Main) {
-        Toast.makeText(
-            context,
-            if (result.isSuccess) "Открываю установку обновления" else "Не удалось скачать обновление",
-            Toast.LENGTH_SHORT
-        ).show()
+private suspend fun installDownloadedUpdate(
+    context: Context,
+    update: AvailableUpdate
+) {
+    if (!ReleaseUpdater.isUpdateDownloaded(context, update)) {
+        return
+    }
+    if (!ReleaseUpdater.canInstallDownloadedApks(context)) {
+        withContext(Dispatchers.Main) {
+            ReleaseUpdater.openInstallPermissionSettings(context)
+        }
+        return
+    }
+
+    runCatching {
+        withContext(Dispatchers.Main) {
+            ReleaseUpdater.installDownloadedApk(context, ReleaseUpdater.downloadedUpdateFile(context, update))
+        }
+    }
+}
+
+@Composable
+private fun AvailableUpdateRow(
+    currentVersionName: String,
+    update: AvailableUpdate,
+    nowMillis: Long,
+    downloadState: UpdateDownloadState?,
+    onOpen: () -> Unit
+) {
+    val state = downloadState?.takeIf { it.tagName == update.tagName }
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHighest
+    ) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    currentVersionName,
+                    style = MaterialTheme.typography.bodySmall.copy(textDecoration = TextDecoration.LineThrough),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+                    fontSize = 12.sp,
+                    maxLines = 1
+                )
+                Text(
+                    "  →  ",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    update.tagName,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1
+                )
+            }
+            Text(
+                formatUpdatePublishedAgo(update.publishedAtMillis, nowMillis),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            state?.let {
+                if (it.progressPercent == null) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                } else {
+                    LinearProgressIndicator(
+                        progress = { it.progressPercent.coerceIn(0, 100) / 100f },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+                Text(
+                    it.message,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            FilledTonalButton(
+                onClick = onOpen,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                shape = RoundedCornerShape(18.dp)
+            ) {
+                Icon(
+                    Icons.Default.Article,
+                    null,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text("Открыть обновление", fontWeight = FontWeight.Bold)
+            }
+        }
     }
 }
 
@@ -514,15 +604,25 @@ fun UpdatesSettings(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
     val selectedChannel by settingsStore.updateChannel.collectAsStateWithLifecycle("stable")
-    val updateStatus by settingsStore.updateLastStatus.collectAsStateWithLifecycle("Обновления еще не проверялись")
     val updateLastCheckAt by settingsStore.updateLastCheckAt.collectAsStateWithLifecycle(0L)
     val updateRateLimitUntil by settingsStore.updateRateLimitUntil.collectAsStateWithLifecycle(0L)
     val checkingUpdates by UpdateCheckCoordinator.isChecking.collectAsStateWithLifecycle()
-    val availableUpdate by UpdateCheckCoordinator.availableUpdate.collectAsStateWithLifecycle()
+    val availableUpdates by UpdateCheckCoordinator.availableUpdates.collectAsStateWithLifecycle()
+    val downloadState by UpdateCheckCoordinator.downloadState.collectAsStateWithLifecycle()
     val selected = normalizeUpdateChannel(selectedChannel)
+    val appVersionName = remember(context) { readAppVersionName(context) }
+    val installedVersion = remember(appVersionName) { ReleaseUpdater.parseVersion(appVersionName) }
+    val newerUpdates = remember(availableUpdates, installedVersion) {
+        availableUpdates
+            .filter { installedVersion == null || it.version > installedVersion }
+            .sortedByDescending { it.version }
+    }
+    val displayedUpdates = remember(newerUpdates, selected) {
+        newerUpdates
+            .filter { ReleaseUpdater.updateMatchesChannel(it, selected) }
+    }
     var showChangelogDialog by remember { mutableStateOf(false) }
     var dialogUpdate by remember { mutableStateOf<AvailableUpdate?>(null) }
-    var dismissedDialogTag by remember { mutableStateOf<String?>(null) }
     var nowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
     val rateLimitAlert = formatRateLimitAlert(updateRateLimitUntil, nowMillis)
 
@@ -530,15 +630,6 @@ fun UpdatesSettings(onBack: () -> Unit) {
         while (true) {
             nowMillis = System.currentTimeMillis()
             delay(1000L)
-        }
-    }
-
-    LaunchedEffect(availableUpdate?.tagName) {
-        val update = availableUpdate
-        if (update == null) {
-            dialogUpdate = null
-        } else if (dismissedDialogTag != update.tagName) {
-            dialogUpdate = update
         }
     }
 
@@ -617,8 +708,6 @@ fun UpdatesSettings(onBack: () -> Unit) {
             Button(
                 onClick = {
                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                    dismissedDialogTag = null
-                    UpdateCheckCoordinator.clearAvailableUpdate()
                     UpdateCheckCoordinator.requestManualCheck(context, settingsStore, selected)
                 },
                 modifier = Modifier.fillMaxWidth().height(54.dp),
@@ -639,63 +728,47 @@ fun UpdatesSettings(onBack: () -> Unit) {
         }
 
         CategoryCard("Доступные обновления", Icons.Default.NewReleases) {
+            if (checkingUpdates && displayedUpdates.isEmpty()) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+            if (checkingUpdates && displayedUpdates.isNotEmpty()) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(12.dp))
+            }
+
             AnimatedContent(
-                targetState = when {
-                    checkingUpdates -> "checking"
-                    availableUpdate != null -> "available"
-                    updateStatus == "Обновлений нет" -> "none"
-                    else -> "idle"
+                targetState = displayedUpdates,
+                transitionSpec = {
+                    fadeIn(animationSpec = tween(durationMillis = 160, delayMillis = 40)) togetherWith
+                        fadeOut(animationSpec = tween(durationMillis = 120)) using
+                        SizeTransform(clip = false) { _, _ ->
+                            tween(durationMillis = 220, easing = FastOutSlowInEasing)
+                        }
                 },
-                label = "available_updates_state"
-            ) { state ->
-                when (state) {
-                    "checking" -> Column {
-                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                        Spacer(Modifier.height(12.dp))
-                        Text(
-                            "Ищем свежие обновления.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    "available" -> availableUpdate?.let { update ->
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text(update.tagName, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-                            Text(update.releaseName, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold)
-                            Text(
-                                "APK: ${update.asset.name}",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Text(
-                                "Changelog: ${update.changelogAsset?.name ?: "не прикреплен"}",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            FilledTonalButton(
-                                onClick = {
-                                    dismissedDialogTag = null
-                                    dialogUpdate = update
-                                },
-                                modifier = Modifier.fillMaxWidth().height(48.dp),
-                                shape = RoundedCornerShape(18.dp)
-                            ) {
-                                Icon(Icons.Default.Article, null, modifier = Modifier.size(20.dp))
-                                Spacer(Modifier.width(8.dp))
-                                Text("Открыть обновление", fontWeight = FontWeight.Bold)
+                label = "available_updates_content"
+            ) { updates ->
+                if (updates.isEmpty()) {
+                    Text(
+                        "Нет доступных обновлений.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        updates.forEach { update ->
+                            key(update.tagName) {
+                                AvailableUpdateRow(
+                                    currentVersionName = appVersionName,
+                                    update = update,
+                                    nowMillis = nowMillis,
+                                    downloadState = downloadState,
+                                    onOpen = {
+                                        dialogUpdate = update
+                                    }
+                                )
                             }
                         }
                     }
-                    "none" -> Text(
-                        "Нет доступных обновлений.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    else -> Text(
-                        "Нет доступных обновлений.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
                 }
             }
         }
@@ -709,8 +782,10 @@ fun UpdatesSettings(onBack: () -> Unit) {
     dialogUpdate?.let { update ->
         UpdateAvailableDialog(
             update = update,
+            currentVersionName = appVersionName,
+            isDownloaded = ReleaseUpdater.isUpdateDownloaded(context, update),
+            downloadState = downloadState,
             onClose = {
-                dismissedDialogTag = update.tagName
                 dialogUpdate = null
             },
             onLater = {
@@ -719,8 +794,6 @@ fun UpdatesSettings(onBack: () -> Unit) {
                     settingsStore.saveUpdateLaterUntil(selected, System.currentTimeMillis() + UPDATE_REMIND_LATER_MS)
                     settingsStore.saveUpdateStatus("Обновление ${update.tagName} отложено")
                 }
-                UpdateCheckCoordinator.clearAvailableUpdate()
-                dismissedDialogTag = update.tagName
                 dialogUpdate = null
             },
             onSkip = {
@@ -729,18 +802,18 @@ fun UpdatesSettings(onBack: () -> Unit) {
                     settingsStore.saveSkippedUpdateTag(selected, update.tagName)
                     settingsStore.saveUpdateStatus("Пропущена версия ${update.tagName}")
                 }
-                UpdateCheckCoordinator.clearAvailableUpdate()
-                dismissedDialogTag = update.tagName
                 dialogUpdate = null
             },
             onDownload = {
                 scope.launch {
                     settingsStore.saveRemoteChangelogSeenKey(selected, buildRemoteChangelogSeenKey(update))
-                    downloadAndInstallUpdate(context, settingsStore, selected, update)
+                    downloadUpdate(context, settingsStore, selected, update)
                 }
-                UpdateCheckCoordinator.clearAvailableUpdate()
-                dismissedDialogTag = update.tagName
-                dialogUpdate = null
+            },
+            onInstall = {
+                scope.launch {
+                    installDownloadedUpdate(context, update)
+                }
             }
         )
     }
@@ -1260,11 +1333,14 @@ fun ImportantInfoDialog(onDismiss: () -> Unit) {
 }
 
 @Composable
-fun ChangelogDialog(onDismiss: () -> Unit) {
+fun ChangelogDialog(
+    markdownOverride: String? = null,
+    onDismiss: () -> Unit
+) {
     val context = LocalContext.current
     val appVersionName = remember(context) { readAppVersionName(context) }
-    val changelog = remember(context, appVersionName) {
-        filterChangelogForVersion(readAssetText(context, "CHANGELOG.md"), appVersionName)
+    val changelog = remember(context, appVersionName, markdownOverride) {
+        markdownOverride ?: filterChangelogForVersion(readAssetText(context, "CHANGELOG.md"), appVersionName)
     }
 
     MarkdownDialog(title = "История изменений", markdown = changelog, onDismiss = onDismiss)

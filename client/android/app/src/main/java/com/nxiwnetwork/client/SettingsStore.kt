@@ -50,9 +50,11 @@ class SettingsStore(context: Context) {
         private val UPDATE_LATER_UNTIL_BY_CHANNEL = stringPreferencesKey("update_later_until_by_channel")
         private val REMOTE_CHANGELOG_SEEN_BY_CHANNEL = stringPreferencesKey("remote_changelog_seen_by_channel")
         private val STARTUP_CHANGELOG_SEEN_BY_CHANNEL = stringPreferencesKey("startup_changelog_seen_by_channel")
+        private val LAST_INSTALLED_VERSION_BY_CHANNEL = stringPreferencesKey("last_installed_version_by_channel")
         private val UPDATE_LAST_STATUS = stringPreferencesKey("update_last_status")
         private val UPDATE_LAST_CHECK_AT = stringPreferencesKey("update_last_check_at")
         private val UPDATE_RATE_LIMIT_UNTIL = stringPreferencesKey("update_rate_limit_until")
+        private val UPDATE_AVAILABLE_CACHE = stringPreferencesKey("update_available_cache")
 
         // НОВЫЙ КЛЮЧ ДЛЯ MTU
         private val CUSTOM_MTU = intPreferencesKey("custom_mtu")
@@ -139,6 +141,8 @@ class SettingsStore(context: Context) {
     suspend fun saveRemoteChangelogSeenKey(channel: String, key: String) { updateStringMap(REMOTE_CHANGELOG_SEEN_BY_CHANNEL, channel, key) }
     suspend fun getStartupChangelogSeenKey(channel: String): String = readStringMap(STARTUP_CHANGELOG_SEEN_BY_CHANNEL).optString(normalizeUpdateChannel(channel), "")
     suspend fun saveStartupChangelogSeenKey(channel: String, key: String) { updateStringMap(STARTUP_CHANGELOG_SEEN_BY_CHANNEL, channel, key) }
+    suspend fun getLastInstalledVersion(channel: String): String = readStringMap(LAST_INSTALLED_VERSION_BY_CHANNEL).optString(normalizeUpdateChannel(channel), "")
+    suspend fun saveLastInstalledVersion(channel: String, versionName: String) { updateStringMap(LAST_INSTALLED_VERSION_BY_CHANNEL, channel, versionName) }
     suspend fun saveUpdateCheckStatus(status: String, checkedAtMillis: Long = System.currentTimeMillis()) {
         dataStore.edit { prefs ->
             prefs[UPDATE_LAST_STATUS] = status
@@ -148,6 +152,15 @@ class SettingsStore(context: Context) {
     suspend fun saveUpdateStatus(status: String) { dataStore.edit { prefs -> prefs[UPDATE_LAST_STATUS] = status } }
     suspend fun getUpdateRateLimitUntil(): Long = dataStore.data.first()[UPDATE_RATE_LIMIT_UNTIL]?.toLongOrNull() ?: 0L
     suspend fun saveUpdateRateLimitUntil(untilMillis: Long) { dataStore.edit { prefs -> prefs[UPDATE_RATE_LIMIT_UNTIL] = untilMillis.toString() } }
+    suspend fun getCachedAvailableUpdates(): List<AvailableUpdate> {
+        return ReleaseUpdater.decodeAvailableUpdates(dataStore.data.first()[UPDATE_AVAILABLE_CACHE].orEmpty())
+    }
+    suspend fun hasCachedAvailableUpdates(): Boolean {
+        return dataStore.data.first().contains(UPDATE_AVAILABLE_CACHE)
+    }
+    suspend fun saveCachedAvailableUpdates(updates: List<AvailableUpdate>) {
+        dataStore.edit { prefs -> prefs[UPDATE_AVAILABLE_CACHE] = ReleaseUpdater.encodeAvailableUpdates(updates) }
+    }
 
     // НОВАЯ ФУНКЦИЯ СОХРАНЕНИЯ MTU
     suspend fun saveCustomMtu(mtu: Int) { dataStore.edit { prefs -> prefs[CUSTOM_MTU] = mtu } }

@@ -37,3 +37,41 @@ fun filterChangelogForVersion(markdown: String, versionName: String): String {
         "# История изменений\n\n- Для текущего канала обновлений пока нет записей."
     }
 }
+
+fun filterChangelogForUpdateRange(
+    markdown: String,
+    previousVersionName: String?,
+    currentVersionName: String
+): String {
+    val currentVersion = ReleaseUpdater.parseVersion(currentVersionName)
+    val previousVersion = previousVersionName?.let(ReleaseUpdater::parseVersion)
+    val currentChannel = parseUpdateChannel(currentVersionName)
+    val visibleLines = mutableListOf<String>()
+    var insideVersionSection = false
+    var includeCurrentSection = true
+    var includedVersionSection = false
+
+    markdown.lineSequence().forEach { line ->
+        if (line.startsWith("## ")) {
+            insideVersionSection = true
+            val sectionTitle = line.removePrefix("## ").trim()
+            val sectionVersion = ReleaseUpdater.parseVersion(sectionTitle)
+            val sectionChannel = parseUpdateChannel(sectionTitle)
+            val matchesChannel = sectionChannel.priority >= currentChannel.priority
+            val isNewerThanPrevious = when {
+                sectionVersion == null -> previousVersion == null
+                previousVersion == null -> sectionVersion == currentVersion
+                else -> sectionVersion > previousVersion
+            }
+            val isNotNewerThanCurrent = currentVersion?.let { sectionVersion == null || sectionVersion <= it } ?: true
+            includeCurrentSection = matchesChannel && isNewerThanPrevious && isNotNewerThanCurrent
+            if (includeCurrentSection) includedVersionSection = true
+        }
+
+        if (!insideVersionSection || includeCurrentSection) {
+            visibleLines += line
+        }
+    }
+
+    return if (includedVersionSection) visibleLines.joinToString("\n") else ""
+}
