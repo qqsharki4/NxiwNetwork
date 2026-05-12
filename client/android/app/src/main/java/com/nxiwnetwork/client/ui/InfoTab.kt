@@ -53,6 +53,9 @@ import com.nxiwnetwork.client.SettingsStore
 import com.nxiwnetwork.client.TunnelManager
 import com.nxiwnetwork.client.UpdateAvailableDialog
 import com.nxiwnetwork.client.UpdateCheckCoordinator
+import com.nxiwnetwork.client.normalizeVkHashFieldEdit
+import com.nxiwnetwork.client.normalizeVkHashInput
+import com.nxiwnetwork.client.normalizeVkHashList
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
@@ -68,9 +71,6 @@ import kotlin.math.roundToInt
 private const val UPDATE_REMIND_LATER_MS = 12L * 60L * 60L * 1000L
 private const val VK_HASH_ROW_ANIMATION_MS = 300
 private const val VK_HASH_TRASH_ANIMATION_MS = 320
-private val VK_JOIN_LINK_REGEX = Regex(
-    pattern = """(?i)(?:https?://)?(?:[a-z0-9-]+\.)?vk\.(?:ru|com)/call/join/([^/?#\s,;]+)"""
-)
 
 private data class VkHashFieldUi(
     val id: Long,
@@ -91,28 +91,6 @@ private data class VkHashSlotUi(
     val labelIndex: Int = 0
 ) {
     val contentKey: String get() = "$slotIndex:$type"
-}
-
-private fun normalizeVkHashInput(input: String): String {
-    val trimmed = input.trim().trim(',', ';')
-    return VK_JOIN_LINK_REGEX.find(trimmed)
-        ?.groupValues
-        ?.getOrNull(1)
-        ?.trim()
-        ?.trimEnd('/')
-        ?: trimmed
-}
-
-private fun normalizeVkHashList(input: String): String {
-    return input
-        .split(",")
-        .map { normalizeVkHashInput(it) }
-        .filter { it.isNotEmpty() }
-        .joinToString(",")
-}
-
-private fun normalizeVkHashFieldEdit(input: String): String {
-    return if (VK_JOIN_LINK_REGEX.containsMatchIn(input)) normalizeVkHashInput(input) else input
 }
 
 private fun buildVkHashSlots(fields: List<VkHashFieldUi>): List<VkHashSlotUi> {

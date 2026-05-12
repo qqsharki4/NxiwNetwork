@@ -179,9 +179,8 @@ object TunnelManager {
             try {
                 val targetHash = if (activeHashIndex == 0) params.vkHashes else params.secondaryVkHash
                 
-                val hashList = targetHash
-                    .split(Regex("[,\\s\\n]+"))
-                    .map { it.trim() }
+                val hashList = normalizeVkHashList(targetHash)
+                    .split(",")
                     .filter { it.isNotEmpty() }
                     .take(3)
 

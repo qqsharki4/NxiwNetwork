@@ -104,9 +104,9 @@ class SettingsStore(context: Context) {
     suspend fun saveDynamicColor(enabled: Boolean) { dataStore.edit { prefs -> prefs[USE_DYNAMIC_COLOR] = enabled } }
     suspend fun saveServersList(jsonArrayString: String) { dataStore.edit { prefs -> prefs[SAVED_SERVERS] = jsonArrayString } }
     suspend fun save(peer: String, vkHashes: String, secondaryVkHash: String, workersPerHash: Int, protocol: String, listenPort: Int, sni: String = "") {
-        dataStore.edit { prefs -> prefs[PEER] = peer; prefs[VK_HASHES] = vkHashes; prefs[SECONDARY_VK_HASH] = secondaryVkHash; prefs[WORKERS_PER_HASH] = workersPerHash; prefs[PROTOCOL] = protocol; prefs[LISTEN_PORT] = listenPort; prefs[SNI] = sni }
+        dataStore.edit { prefs -> prefs[PEER] = peer; prefs[VK_HASHES] = normalizeVkHashList(vkHashes); prefs[SECONDARY_VK_HASH] = normalizeVkHashInput(secondaryVkHash); prefs[WORKERS_PER_HASH] = workersPerHash; prefs[PROTOCOL] = protocol; prefs[LISTEN_PORT] = listenPort; prefs[SNI] = sni }
     }
-    suspend fun saveVkHashes(vkHashes: String) { dataStore.edit { prefs -> prefs[VK_HASHES] = vkHashes } }
+    suspend fun saveVkHashes(vkHashes: String) { dataStore.edit { prefs -> prefs[VK_HASHES] = normalizeVkHashList(vkHashes) } }
     suspend fun saveWorkersPerHash(workersPerHash: Int) { dataStore.edit { prefs -> prefs[WORKERS_PER_HASH] = workersPerHash.coerceIn(1, 72) } }
     suspend fun saveProtocol(protocol: String) { dataStore.edit { prefs -> prefs[PROTOCOL] = if (protocol == "tcp") "tcp" else "udp" } }
     suspend fun saveUserAgent(ua: String) { dataStore.edit { prefs -> prefs[USER_AGENT] = ua } }

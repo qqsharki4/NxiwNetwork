@@ -6,13 +6,16 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 )
 
 var groupAuthMutex sync.Mutex
+var vkJoinLinkRE = regexp.MustCompile(`(?i)(?:https?://)?(?:[a-z0-9-]+\.)?vk\.(?:ru|com)/call/join/([^/?#\s,;]+)`)
 
 const (
 	workersPerGroup  = 12
@@ -313,16 +316,40 @@ func WorkerGroup(
 	}
 }
 
+func normalizeVKHash(raw string) string {
+	h := strings.Trim(strings.TrimSpace(raw), ",;")
+	if match := vkJoinLinkRE.FindStringSubmatch(h); len(match) > 1 {
+		return strings.TrimSuffix(strings.TrimSpace(match[1]), "/")
+	}
+	if idx := strings.IndexAny(h, "/?#"); idx != -1 {
+		h = h[:idx]
+	}
+	return h
+}
+
 // ParseHashes — парсит строку хешей
 func ParseHashes(raw string) []string {
 	var result []string
-	for _, h := range strings.Split(raw, ",") {
-		h = strings.TrimSpace(h)
-		if idx := strings.IndexAny(h, "/?#"); idx != -1 {
-			h = h[:idx]
+	for _, chunk := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r'
+	}) {
+		matches := vkJoinLinkRE.FindAllStringSubmatch(chunk, -1)
+		if len(matches) > 0 {
+			for _, match := range matches {
+				if len(match) > 1 {
+					if h := normalizeVKHash(match[1]); h != "" {
+						result = append(result, h)
+					}
+				}
+			}
+			continue
 		}
-		if h != "" {
-			result = append(result, h)
+
+		for _, h := range strings.FieldsFunc(chunk, unicode.IsSpace) {
+			h = normalizeVKHash(h)
+			if h != "" {
+				result = append(result, h)
+			}
 		}
 	}
 	return result
