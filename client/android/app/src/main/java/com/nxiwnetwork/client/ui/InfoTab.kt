@@ -73,10 +73,26 @@ import kotlin.math.roundToInt
 private const val VK_HASH_ROW_ANIMATION_MS = 300
 private const val VK_HASH_TRASH_ANIMATION_MS = 320
 private const val UPDATE_REMIND_LATER_MS = 24L * 60L * 60L * 1000L
+private val SEGMENTED_CONTROL_HEIGHT = 40.dp
 
 private fun <S> AnimatedContentTransitionScope<S>.noContentAnimation(): ContentTransform =
     (EnterTransition.None togetherWith ExitTransition.None) using
         SizeTransform(clip = false) { _, _ -> tween(0) }
+
+@Composable
+private fun SegmentedControlLoadSlot(
+    loaded: Boolean,
+    content: @Composable () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(SEGMENTED_CONTROL_HEIGHT),
+        contentAlignment = Alignment.Center
+    ) {
+        if (loaded) content()
+    }
+}
 
 private data class VkHashFieldUi(
     val id: Long,
@@ -663,10 +679,10 @@ fun UpdatesSettings(onBack: () -> Unit) {
         SettingsHeader("Обновления", onBack)
 
         CategoryCard("Канал обновлений", Icons.Default.SystemUpdate, animateSize = animateUpdateChanges) {
-            if (selectedChannelOrNull == null) {
-                Spacer(Modifier.fillMaxWidth().height(40.dp))
-            } else {
-                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+            SegmentedControlLoadSlot(loaded = selectedChannelOrNull != null) {
+                SingleChoiceSegmentedButtonRow(
+                    modifier = Modifier.fillMaxWidth().height(SEGMENTED_CONTROL_HEIGHT)
+                ) {
                     listOf("stable" to "Stable", "pre" to "Pre", "dev" to "Dev").forEachIndexed { index, (value, label) ->
                         SegmentedButton(
                             selected = selected == value,
@@ -882,10 +898,21 @@ fun NetworkSettings(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
 
-    val protocol by settingsStore.protocol.collectAsStateWithLifecycle("udp")
+    val protocolOrNull by remember(settingsStore) {
+        settingsStore.protocol.map { if (it == "tcp") "tcp" else "udp" }
+    }.collectAsStateWithLifecycle(null)
     val customMtu by settingsStore.customMtu.collectAsStateWithLifecycle(0)
-    val dnsType by settingsStore.customDns.collectAsStateWithLifecycle("default")
+    val dnsTypeOrNull by remember(settingsStore) {
+        settingsStore.customDns.map { dns ->
+            when (dns) {
+                "adguard", "cloudflare", "custom" -> dns
+                else -> "default"
+            }
+        }
+    }.collectAsStateWithLifecycle(null)
     val customDnsIp by settingsStore.customDnsIp.collectAsStateWithLifecycle("1.1.1.1")
+    val protocol = protocolOrNull ?: "udp"
+    val dnsType = dnsTypeOrNull ?: "default"
 
     var lastMtu by remember(customMtu) { mutableIntStateOf(customMtu) }
     var animateProtocolSelection by remember { mutableStateOf(false) }
@@ -894,22 +921,26 @@ fun NetworkSettings(onBack: () -> Unit) {
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         SettingsHeader("Сеть", onBack)
-        CategoryCard("Транспорт", Icons.Default.CompareArrows) {
+        CategoryCard("Транспорт", Icons.Default.CompareArrows, animateSize = false) {
             Text("Сетевой протокол", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, fontSize = 16.sp)
             Spacer(Modifier.height(12.dp))
-            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                listOf("udp" to "UDP", "tcp" to "TCP").forEachIndexed { i, (v, l) ->
-                    val selected = protocol == v
-                    SegmentedButton(
-                        selected = selected,
-                        shape = SegmentedButtonDefaults.itemShape(index = i, count = 2),
-                        icon = { SegmentedSelectionIcon(selected, animateProtocolSelection) },
-                        onClick = {
-                            if (protocol != v) animateProtocolSelection = true
-                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            scope.launch { settingsStore.saveProtocol(v) }
-                        }
-                    ) { Text(l, fontSize = 14.sp) }
+            SegmentedControlLoadSlot(loaded = protocolOrNull != null) {
+                SingleChoiceSegmentedButtonRow(
+                    modifier = Modifier.fillMaxWidth().height(SEGMENTED_CONTROL_HEIGHT)
+                ) {
+                    listOf("udp" to "UDP", "tcp" to "TCP").forEachIndexed { i, (v, l) ->
+                        val selected = protocol == v
+                        SegmentedButton(
+                            selected = selected,
+                            shape = SegmentedButtonDefaults.itemShape(index = i, count = 2),
+                            icon = { SegmentedSelectionIcon(selected, animateProtocolSelection) },
+                            onClick = {
+                                if (protocol != v) animateProtocolSelection = true
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                scope.launch { settingsStore.saveProtocol(v) }
+                            }
+                        ) { Text(l, fontSize = 14.sp) }
+                    }
                 }
             }
             Divider(modifier = Modifier.padding(vertical = 16.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
@@ -939,19 +970,23 @@ fun NetworkSettings(onBack: () -> Unit) {
             Text("Меньшее значение может помочь при плохой связи. Оптимально: 1280-1420.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
         }
         CategoryCard("DNS Сервер", Icons.Default.Dns, animateSize = animateDnsSelection) {
-            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                listOf("default" to "Авто", "adguard" to "AdGuard", "cloudflare" to "Cloudflare", "custom" to "Свой").forEachIndexed { i, (v, l) ->
-                    val selected = dnsType == v
-                    SegmentedButton(
-                        selected = selected,
-                        shape = SegmentedButtonDefaults.itemShape(index = i, count = 4),
-                        icon = { SegmentedSelectionIcon(selected, animateDnsSelection) },
-                        onClick = {
-                            if (dnsType != v) animateDnsSelection = true
-                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            scope.launch { settingsStore.saveCustomDns(v); TunnelManager.reloadWireGuard() }
-                        }
-                    ) { Text(l, fontSize = 11.sp, maxLines = 1) }
+            SegmentedControlLoadSlot(loaded = dnsTypeOrNull != null) {
+                SingleChoiceSegmentedButtonRow(
+                    modifier = Modifier.fillMaxWidth().height(SEGMENTED_CONTROL_HEIGHT)
+                ) {
+                    listOf("default" to "Авто", "adguard" to "AdGuard", "cloudflare" to "Cloudflare", "custom" to "Свой").forEachIndexed { i, (v, l) ->
+                        val selected = dnsType == v
+                        SegmentedButton(
+                            selected = selected,
+                            shape = SegmentedButtonDefaults.itemShape(index = i, count = 4),
+                            icon = { SegmentedSelectionIcon(selected, animateDnsSelection) },
+                            onClick = {
+                                if (dnsType != v) animateDnsSelection = true
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                scope.launch { settingsStore.saveCustomDns(v); TunnelManager.reloadWireGuard() }
+                            }
+                        ) { Text(l, fontSize = 11.sp, maxLines = 1) }
+                    }
                 }
             }
             AnimatedVisibility(
@@ -1005,10 +1040,15 @@ fun PerformanceSettings(onBack: () -> Unit) {
     val haptic = LocalHapticFeedback.current
 
     val workersCount by settingsStore.workersPerHash.collectAsStateWithLifecycle(12)
-    val captchaMethod by settingsStore.captchaSolveMethod.collectAsStateWithLifecycle("manual")
+    val captchaMethodOrNull by remember(settingsStore) {
+        settingsStore.captchaSolveMethod.map { method ->
+            if (captchaMethodOptions.any { it.first == method }) method else "manual"
+        }
+    }.collectAsStateWithLifecycle(null)
     val currentHashesFromStore by settingsStore.vkHashes.collectAsStateWithLifecycle("")
     val wifiHighPerformance by settingsStore.wifiHighPerformance.collectAsStateWithLifecycle(true)
     val keepaliveSeconds by settingsStore.clientKeepaliveSeconds.collectAsStateWithLifecycle(10)
+    val captchaMethod = captchaMethodOrNull ?: "manual"
 
     var nextHashFieldId by remember { mutableLongStateOf(1L) }
     var hashFields by remember { mutableStateOf(listOf(VkHashFieldUi(id = 0L, value = ""))) }
@@ -1229,19 +1269,23 @@ fun PerformanceSettings(onBack: () -> Unit) {
             Text("Больше интервал — меньше фоновой активности. Если соединение начинает засыпать, верни 10 секунд.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
         }
         CategoryCard("Решение капчи", Icons.Default.SmartToy) {
-            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                captchaMethodOptions.forEachIndexed { i, (v, l) ->
-                    val selected = captchaMethod == v || (captchaMethod == "auto" && v == "rjs_classic")
-                    SegmentedButton(
-                        selected = selected,
-                        shape = SegmentedButtonDefaults.itemShape(index = i, count = captchaMethodOptions.size),
-                        icon = { SegmentedSelectionIcon(selected, animateCaptchaSelection) },
-                        onClick = {
-                            if (!selected) animateCaptchaSelection = true
-                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            scope.launch { settingsStore.saveCaptchaMode(captchaModeForMethod(v)); settingsStore.saveCaptchaSolveMethod(v) }
-                        }
-                    ) { Text(l, fontSize = 14.sp) }
+            SegmentedControlLoadSlot(loaded = captchaMethodOrNull != null) {
+                SingleChoiceSegmentedButtonRow(
+                    modifier = Modifier.fillMaxWidth().height(SEGMENTED_CONTROL_HEIGHT)
+                ) {
+                    captchaMethodOptions.forEachIndexed { i, (v, l) ->
+                        val selected = captchaMethod == v || (captchaMethod == "auto" && v == "rjs_classic")
+                        SegmentedButton(
+                            selected = selected,
+                            shape = SegmentedButtonDefaults.itemShape(index = i, count = captchaMethodOptions.size),
+                            icon = { SegmentedSelectionIcon(selected, animateCaptchaSelection) },
+                            onClick = {
+                                if (!selected) animateCaptchaSelection = true
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                scope.launch { settingsStore.saveCaptchaMode(captchaModeForMethod(v)); settingsStore.saveCaptchaSolveMethod(v) }
+                            }
+                        ) { Text(l, fontSize = 14.sp) }
+                    }
                 }
             }
         }
@@ -1256,8 +1300,16 @@ fun InterfaceSettings(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
 
-    val themeMode by settingsStore.themeMode.collectAsStateWithLifecycle("system")
+    val themeModeOrNull by remember(settingsStore) {
+        settingsStore.themeMode.map { mode ->
+            when (mode) {
+                "light", "dark", "amoled" -> mode
+                else -> "system"
+            }
+        }
+    }.collectAsStateWithLifecycle(null)
     val dynamicColor by settingsStore.useDynamicColor.collectAsStateWithLifecycle(true)
+    val themeMode = themeModeOrNull ?: "system"
     var animateThemeSelection by remember { mutableStateOf(false) }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -1265,19 +1317,23 @@ fun InterfaceSettings(onBack: () -> Unit) {
         CategoryCard("Внешний вид", Icons.Default.Palette, animateSize = false) {
             Text("Тема оформления", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, fontSize = 16.sp)
             Spacer(Modifier.height(12.dp))
-            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                listOf("system" to "Авто", "light" to "Светлая", "dark" to "Темная", "amoled" to "Amoled").forEachIndexed { i, (v, l) ->
-                    val selected = themeMode == v
-                    SegmentedButton(
-                        selected = selected,
-                        shape = SegmentedButtonDefaults.itemShape(index = i, count = 4),
-                        icon = { SegmentedSelectionIcon(selected, animateThemeSelection) },
-                        onClick = {
-                            if (themeMode != v) animateThemeSelection = true
-                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            scope.launch { settingsStore.saveThemeMode(v) }
-                        }
-                    ) { Text(l, fontSize = 12.sp, maxLines = 1) }
+            SegmentedControlLoadSlot(loaded = themeModeOrNull != null) {
+                SingleChoiceSegmentedButtonRow(
+                    modifier = Modifier.fillMaxWidth().height(SEGMENTED_CONTROL_HEIGHT)
+                ) {
+                    listOf("system" to "Авто", "light" to "Светлая", "dark" to "Темная", "amoled" to "Amoled").forEachIndexed { i, (v, l) ->
+                        val selected = themeMode == v
+                        SegmentedButton(
+                            selected = selected,
+                            shape = SegmentedButtonDefaults.itemShape(index = i, count = 4),
+                            icon = { SegmentedSelectionIcon(selected, animateThemeSelection) },
+                            onClick = {
+                                if (themeMode != v) animateThemeSelection = true
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                scope.launch { settingsStore.saveThemeMode(v) }
+                            }
+                        ) { Text(l, fontSize = 12.sp, maxLines = 1) }
+                    }
                 }
             }
             Divider(modifier = Modifier.padding(vertical = 16.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
