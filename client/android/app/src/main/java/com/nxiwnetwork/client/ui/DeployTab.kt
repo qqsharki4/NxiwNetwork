@@ -6,7 +6,6 @@ import android.os.Build
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -19,11 +18,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -46,8 +40,6 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 import java.util.Properties
-import kotlin.math.PI
-import kotlin.math.sin
 
 private const val CMD_TIMEOUT = 900000L
 
@@ -56,73 +48,6 @@ fun DeployTab() {
     val context = LocalContext.current
     LaunchedEffect(Unit) { NodesManager.init(context) }
     NodesListSection()
-}
-
-// Кастомный компонент Wavy Indicator, который работает всегда и везде!
-@Composable
-fun CustomWavyProgressIndicator(
-    progress: Float,
-    modifier: Modifier = Modifier,
-    color: Color = MaterialTheme.colorScheme.primary,
-    trackColor: Color = MaterialTheme.colorScheme.surfaceVariant
-) {
-    val infiniteTransition = rememberInfiniteTransition(label = "wave")
-    val phaseShift by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = (2 * PI).toFloat(),
-        animationSpec = infiniteRepeatable(
-            animation = tween(1200, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "phase"
-    )
-
-    Canvas(modifier = modifier.height(14.dp)) {
-        val waveLength = 32.dp.toPx()
-        val amplitude = size.height / 2 - 2.dp.toPx()
-        val centerY = size.height / 2
-        val progressWidth = size.width * progress.coerceIn(0f, 1f)
-
-        // Рисуем задний фон (track)
-        val trackPath = Path()
-        var x = progressWidth
-        var first = true
-        while (x <= size.width) {
-            val y = centerY + sin((x / waveLength) * 2 * PI - phaseShift).toFloat() * amplitude
-            if (first) {
-                trackPath.moveTo(x, y)
-                first = false
-            } else trackPath.lineTo(x, y)
-            x += 2f
-        }
-        if (!first) {
-            drawPath(
-                path = trackPath,
-                color = trackColor,
-                style = Stroke(width = 4.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
-            )
-        }
-
-        // Рисуем заполненный прогресс
-        val progressPath = Path()
-        x = 0f
-        first = true
-        while (x <= progressWidth) {
-            val y = centerY + sin((x / waveLength) * 2 * PI - phaseShift).toFloat() * amplitude
-            if (first) {
-                progressPath.moveTo(x, y)
-                first = false
-            } else progressPath.lineTo(x, y)
-            x += 2f
-        }
-        if (!first) {
-            drawPath(
-                path = progressPath,
-                color = color,
-                style = Stroke(width = 4.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
-            )
-        }
-    }
 }
 
 private class SSHClient(private val session: Session, private val pass: String, private val user: String) {

@@ -14,6 +14,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -40,6 +43,7 @@ import com.nxiwnetwork.client.StorageDiagnostics
 import com.nxiwnetwork.client.TunnelManager
 import com.nxiwnetwork.client.TrafficDiagnostics
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 
 @Composable
 internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
@@ -268,6 +272,7 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
                     }
 
                     DebugSectionTitle("Devtools")
+                    DebugWavyProgressPreview()
                     DebugToolButton(Icons.Default.ContentCopy, "Копировать debug snapshot", "Копирует состояние приложения без хешей и паролей.") {
                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                         copyDebugText("NxiwNetwork Debug", snapshot, "Снимок отладки скопирован")
@@ -350,6 +355,53 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
                     Text("Закрыть", fontWeight = FontWeight.Bold)
                 }
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun DebugWavyProgressPreview() {
+    val progress = remember { Animatable(0f) }
+    var indeterminate by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            indeterminate = false
+            progress.snapTo(0f)
+            progress.animateTo(
+                targetValue = 1f,
+                animationSpec = tween(durationMillis = 3200, easing = LinearEasing)
+            )
+            indeterminate = true
+            delay(1800)
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
+            .padding(horizontal = 14.dp, vertical = 12.dp)
+    ) {
+        Text(
+            "Wavy progress preview",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+            fontWeight = FontWeight.Bold
+        )
+        Spacer(Modifier.height(10.dp))
+        if (indeterminate) {
+            LinearWavyProgressIndicator(
+                modifier = Modifier.fillMaxWidth().height(14.dp),
+                amplitude = 1f
+            )
+        } else {
+            LinearWavyProgressIndicator(
+                progress = { progress.value },
+                modifier = Modifier.fillMaxWidth().height(14.dp),
+                amplitude = { value -> WavyProgressIndicatorDefaults.indicatorAmplitude(value) }
+            )
         }
     }
 }

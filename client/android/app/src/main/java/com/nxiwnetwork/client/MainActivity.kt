@@ -24,7 +24,6 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -44,12 +43,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -800,6 +794,7 @@ fun UpdateAvailableDialog(
     }
 }
 
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun DownloadApkProgressIndicator(
     progress: Float,
@@ -807,71 +802,20 @@ private fun DownloadApkProgressIndicator(
     isIndeterminate: Boolean,
     modifier: Modifier = Modifier
 ) {
-    val colorScheme = MaterialTheme.colorScheme
-    val trackColor = colorScheme.surfaceVariant.copy(alpha = 0.64f)
-    val progressColor = colorScheme.primary
-    val waveColor = colorScheme.onPrimary.copy(alpha = 0.82f)
-    val indeterminateWaveColor = colorScheme.primary
-    val transition = rememberInfiniteTransition(label = "apk_download_wave")
-    val waveOffset by transition.animateFloat(
-        initialValue = -0.55f,
-        targetValue = 1.55f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1250, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "apk_download_wave_offset"
-    )
-
-    Canvas(
-        modifier = modifier
-            .height(8.dp)
-            .clip(RoundedCornerShape(999.dp))
-    ) {
-        val corner = CornerRadius(size.height / 2f, size.height / 2f)
-        drawRoundRect(
-            color = trackColor,
-            size = size,
-            cornerRadius = corner
+    val indicatorModifier = modifier.height(14.dp)
+    if (isIndeterminate) {
+        LinearWavyProgressIndicator(
+            modifier = indicatorModifier,
+            amplitude = if (isActive) 1f else 0f
         )
-
-        val filledWidth = if (isIndeterminate) {
-            0f
-        } else {
-            (size.width * progress.coerceIn(0f, 1f)).coerceAtLeast(if (progress > 0f) size.height else 0f)
-        }
-        if (filledWidth > 0f) {
-            drawRoundRect(
-                color = progressColor,
-                size = Size(filledWidth, size.height),
-                cornerRadius = corner
-            )
-        }
-
-        if (isActive) {
-            val waveWidth = size.width * if (isIndeterminate) 0.38f else 0.28f
-            val startX = (size.width + waveWidth) * waveOffset - waveWidth
-            val endX = startX + waveWidth
-            val clipRight = if (isIndeterminate) size.width else filledWidth
-            if (clipRight > 0f) {
-                clipRect(left = 0f, top = 0f, right = clipRight, bottom = size.height) {
-                    drawRoundRect(
-                        brush = Brush.horizontalGradient(
-                            0f to Color.Transparent,
-                            0.42f to if (isIndeterminate) indeterminateWaveColor.copy(alpha = 0.18f) else waveColor.copy(alpha = 0.10f),
-                            0.5f to if (isIndeterminate) indeterminateWaveColor else waveColor,
-                            0.58f to if (isIndeterminate) indeterminateWaveColor.copy(alpha = 0.18f) else waveColor.copy(alpha = 0.10f),
-                            1f to Color.Transparent,
-                            startX = startX,
-                            endX = endX
-                        ),
-                        topLeft = Offset(startX, 0f),
-                        size = Size(waveWidth, size.height),
-                        cornerRadius = corner
-                    )
-                }
+    } else {
+        LinearWavyProgressIndicator(
+            progress = { progress },
+            modifier = indicatorModifier,
+            amplitude = { value ->
+                if (isActive) WavyProgressIndicatorDefaults.indicatorAmplitude(value) else 0f
             }
-        }
+        )
     }
 }
 

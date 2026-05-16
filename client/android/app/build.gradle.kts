@@ -1,5 +1,3 @@
-import com.android.build.VariantOutput
-import com.android.build.gradle.api.ApkVariantOutput
 import java.io.File
 import java.util.Properties
 
@@ -9,6 +7,8 @@ val releaseKeystoreProperties = Properties().apply {
         releaseKeystorePropertiesFile.inputStream().use(::load)
     }
 }
+val appVersionCode = 3
+val appVersionName = "1.1.0-dev.3"
 
 fun releaseSigningValue(envName: String, propertyName: String): String? {
     return System.getenv(envName) ?: releaseKeystoreProperties.getProperty(propertyName)
@@ -16,20 +16,20 @@ fun releaseSigningValue(envName: String, propertyName: String): String? {
 
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {
     namespace = "com.nxiwnetwork.client"
-    compileSdk = 34
+    compileSdk = 37
     ndkVersion = "26.1.10909125"
 
     defaultConfig {
         applicationId = "com.nxiwnetwork.client"
         minSdk = 29
         targetSdk = 34
-        versionCode = 3
-        versionName = "1.1.0-dev.3"
+        versionCode = appVersionCode
+        versionName = appVersionName
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
@@ -88,7 +88,7 @@ android {
 
     sourceSets {
         getByName("main") {
-            jniLibs.srcDir(layout.buildDirectory.dir("generated/coreJniLibs"))
+            jniLibs.srcDir(layout.buildDirectory.dir("generated/coreJniLibs").get().asFile)
         }
     }
 
@@ -97,23 +97,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.14"
-    }
-
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
-    applicationVariants.all {
-        if (buildType.name == "release") {
-            val releaseVersionName = versionName
-            outputs.all {
-                val abi = filters.find { it.filterType == VariantOutput.ABI }?.identifier ?: "universal"
-                (this as ApkVariantOutput).outputFileName = "NxiwNetwork-v$releaseVersionName-$abi.apk"
-            }
-        }
-    }
 }
 
 val goCoreDir = rootProject.projectDir.resolve("../core-go").canonicalFile
@@ -226,9 +209,9 @@ fun registerRustClientBuildTask(
             throw GradleException("Rust core build did not produce ${builtBinary.absolutePath}")
         }
         builtBinary.copyTo(outputFile.get().asFile, overwrite = true)
-        exec {
+        providers.exec {
             commandLine("${llvmBin.get()}/llvm-strip", "--strip-unneeded", outputFile.get().asFile.absolutePath)
-        }
+        }.result.get().assertNormalExitValue()
         outputFile.get().asFile.setExecutable(true, false)
     }
 }
@@ -268,10 +251,10 @@ tasks.matching { it.name.startsWith("merge") && it.name.endsWith("JniLibFolders"
 }
 
 dependencies {
-    implementation(platform("androidx.compose:compose-bom:2024.10.00"))
+    implementation(platform("androidx.compose:compose-bom:2026.05.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.foundation:foundation")
-    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material3:material3:1.5.0-alpha19")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.activity:activity-compose:1.9.3")
@@ -279,4 +262,41 @@ dependencies {
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("com.wireguard.android:tunnel:1.0.20230706")
     implementation("com.github.mwiede:jsch:0.2.20")
+}
+
+val releaseApkDir = layout.buildDirectory.dir("outputs/apk/release")
+val renameReleaseApks = tasks.register("renameReleaseApks") {
+    doLast {
+        val outputDir = releaseApkDir.get().asFile
+        val sourceApks = outputDir.listFiles { file ->
+            file.isFile && file.name.endsWith(".apk") && (
+                file.name == "app-release.apk" || file.name.startsWith("app-") && file.name.endsWith("-release.apk")
+            )
+        }.orEmpty()
+        if (sourceApks.isEmpty()) {
+            return@doLast
+        }
+
+        outputDir.listFiles { file ->
+            file.isFile && file.name.startsWith("NxiwNetwork-v$appVersionName-") && file.name.endsWith(".apk")
+        }?.forEach { it.delete() }
+
+        sourceApks.forEach { apk ->
+            val abi = when {
+                apk.name.contains("arm64-v8a") -> "arm64-v8a"
+                apk.name.contains("armeabi-v7a") -> "armeabi-v7a"
+                apk.name.contains("universal") || apk.name == "app-release.apk" -> "universal"
+                else -> apk.name.removePrefix("app-").removeSuffix("-release.apk")
+            }
+            val target = outputDir.resolve("NxiwNetwork-v$appVersionName-$abi.apk")
+            if (!apk.renameTo(target)) {
+                apk.copyTo(target, overwrite = true)
+                apk.delete()
+            }
+        }
+    }
+}
+
+tasks.matching { it.name == "assembleRelease" }.configureEach {
+    finalizedBy(renameReleaseApks)
 }
