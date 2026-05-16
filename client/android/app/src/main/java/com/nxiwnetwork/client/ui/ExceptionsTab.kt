@@ -2,10 +2,22 @@ package com.nxiwnetwork.client.ui
 
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -27,6 +39,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
@@ -34,6 +47,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -101,28 +115,56 @@ fun ExceptionsTab() {
     }
     val visiblePackages = remember(filteredApps) { filteredApps.mapTo(LinkedHashSet()) { it.packageName } }
     val allVisibleSelected = visiblePackages.isNotEmpty() && visiblePackages.all { selectedPackages.contains(it) }
+    val routingBadgeColor by animateColorAsState(
+        targetValue = if (routingEnabled) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+        animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing),
+        label = "routingBadgeColor"
+    )
+    val routingBadgeTextColor by animateColorAsState(
+        targetValue = if (routingEnabled) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+        animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing),
+        label = "routingBadgeTextColor"
+    )
+    val routingCardColor by animateColorAsState(
+        targetValue = if (routingEnabled) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.28f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+        animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
+        label = "routingCardColor"
+    )
+    val routingIconTint by animateColorAsState(
+        targetValue = if (routingEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+        label = "routingIconTint"
+    )
+    val routingBadgeText = "${if (routingEnabled) "Вкл" else "Выкл"} • ${if (isWhitelist) "БС" else "ЧС"} • ${selectedPackages.size}"
 
     Column(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         Row(modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 12.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text("Роутинг", style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold), color = MaterialTheme.colorScheme.onSurface)
-            Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.primaryContainer) {
-                Text("${if (routingEnabled) "Вкл" else "Выкл"} • ${if (isWhitelist) "БС" else "ЧС"} • ${selectedPackages.size}", modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp), color = MaterialTheme.colorScheme.onPrimaryContainer, fontWeight = FontWeight.Bold)
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = routingBadgeColor
+            ) {
+                Box(modifier = Modifier.defaultMinSize(minWidth = 116.dp), contentAlignment = Alignment.Center) {
+                    FadingStateText(
+                        text = routingBadgeText,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        color = routingBadgeTextColor,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
             }
         }
 
-        Surface(modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp), shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)) {
+        Surface(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp).animateContentSize(animationSpec = spring(stiffness = Spring.StiffnessMediumLow)),
+            shape = RoundedCornerShape(24.dp),
+            color = routingCardColor
+        ) {
             Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                 Row(modifier = Modifier.weight(1f).padding(end = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.PowerSettingsNew, null, tint = if (routingEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline)
+                    Icon(Icons.Default.PowerSettingsNew, null, tint = routingIconTint)
                     Spacer(Modifier.width(12.dp))
-                    Column {
-                        Text("Использовать роутинг", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                        Text(
-                            if (routingEnabled) "Список применяется к VPN. Галочки сохраняются." else "Список сохранён, но временно не применяется.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+                    Text("Использовать роутинг", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                 }
                 Switch(
                     checked = routingEnabled,
@@ -144,7 +186,7 @@ fun ExceptionsTab() {
             shape = RoundedCornerShape(20.dp), leadingIcon = { Icon(Icons.Default.Search, null) }, singleLine = true
         )
 
-        Surface(modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp), shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)) {
+        Surface(modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp).animateContentSize(animationSpec = spring(stiffness = Spring.StiffnessMediumLow)), shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)) {
             Column {
                 Row(
                     modifier = Modifier
@@ -161,16 +203,27 @@ fun ExceptionsTab() {
                     Spacer(Modifier.width(12.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text("Параметры", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                        Text("${if (isWhitelist) "Белый список" else "Черный список"} • системные ${if (showSystemApps) "показаны" else "скрыты"}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    Icon(if (showRoutingParams) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    AnimatedContent(
+                        targetState = showRoutingParams,
+                        transitionSpec = {
+                            (fadeIn(animationSpec = tween(160)) + slideInVertically(animationSpec = tween(180, easing = FastOutSlowInEasing)) { it / 3 }) togetherWith
+                                (fadeOut(animationSpec = tween(120)) + slideOutVertically(animationSpec = tween(160, easing = FastOutSlowInEasing)) { -it / 3 })
+                        },
+                        label = "routingParamsArrow"
+                    ) { expanded ->
+                        Icon(if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
-                AnimatedVisibility(visible = showRoutingParams) {
+                AnimatedVisibility(
+                    visible = showRoutingParams,
+                    enter = fadeIn(animationSpec = tween(160)) + expandVertically(animationSpec = tween(240, easing = FastOutSlowInEasing)),
+                    exit = fadeOut(animationSpec = tween(120)) + shrinkVertically(animationSpec = tween(220, easing = FastOutSlowInEasing))
+                ) {
                     Column(modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                             Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
                                 Text("Показывать системные", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold)
-                                Text("Добавляет системные приложения в список ниже.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                             Switch(
                                 checked = showSystemApps,
@@ -181,15 +234,51 @@ fun ExceptionsTab() {
                             )
                         }
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            val blacklistContainer by animateColorAsState(
+                                targetValue = if (!isWhitelist) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
+                                animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                                label = "blacklistModeContainer"
+                            )
+                            val blacklistContent by animateColorAsState(
+                                targetValue = if (!isWhitelist) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                                animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                                label = "blacklistModeContent"
+                            )
+                            val whitelistContainer by animateColorAsState(
+                                targetValue = if (isWhitelist) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
+                                animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                                label = "whitelistModeContainer"
+                            )
+                            val whitelistContent by animateColorAsState(
+                                targetValue = if (isWhitelist) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                                animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                                label = "whitelistModeContent"
+                            )
                             Text("Режим списка", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold)
-                            Text(if (isWhitelist) "БС: отмеченные приложения идут через VPN." else "ЧС: отмеченные приложения обходят VPN.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            AnimatedStateText(
+                                text = if (isWhitelist) "БС: отмеченные приложения идут через VPN." else "ЧС: отмеченные приложения обходят VPN.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                             SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                                 SegmentedButton(
                                     selected = !isWhitelist, shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                                    colors = SegmentedButtonDefaults.colors(
+                                        activeContainerColor = blacklistContainer,
+                                        activeContentColor = blacklistContent,
+                                        inactiveContainerColor = blacklistContainer,
+                                        inactiveContentColor = blacklistContent
+                                    ),
                                     onClick = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); if (isWhitelist) scope.launch { settingsStore.saveIsWhitelist(false); delay(300); TunnelManager.reloadWireGuard() } }
                                 ) { Text("ЧС") }
                                 SegmentedButton(
                                     selected = isWhitelist, shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                                    colors = SegmentedButtonDefaults.colors(
+                                        activeContainerColor = whitelistContainer,
+                                        activeContentColor = whitelistContent,
+                                        inactiveContainerColor = whitelistContainer,
+                                        inactiveContentColor = whitelistContent
+                                    ),
                                     onClick = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); if (!isWhitelist) scope.launch { settingsStore.saveIsWhitelist(true); delay(300); TunnelManager.reloadWireGuard() } }
                                 ) { Text("БС") }
                             }
@@ -200,11 +289,15 @@ fun ExceptionsTab() {
         }
 
         if (!isLoading) {
-            Surface(modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp), shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)) {
+            Surface(modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp).animateContentSize(animationSpec = spring(stiffness = Spring.StiffnessMediumLow)), shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)) {
                 Row(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
                         Text("Приложения", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold)
-                        Text("Видно: ${filteredApps.size} • выбрано: ${selectedPackages.size}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        AnimatedStateText(
+                            text = "Видно: ${filteredApps.size} • выбрано: ${selectedPackages.size}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                     FilledTonalButton(
                         enabled = visiblePackages.isNotEmpty(),
@@ -235,7 +328,7 @@ fun ExceptionsTab() {
             LazyColumn(state = rememberLazyListState(), modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(filteredApps, key = { it.packageName }) { app ->
                     val isSelected = selectedPackages.contains(app.packageName)
-                    AppRow(app, isSelected) {
+                    AppRow(app, isSelected, routingEnabled, isWhitelist) {
                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                         val newList = if (isSelected) selectedPackages - app.packageName else selectedPackages + app.packageName
                         scope.launch {
@@ -250,7 +343,62 @@ fun ExceptionsTab() {
 }
 
 @Composable
-fun AppRow(app: AppItem, isSelected: Boolean, modifier: Modifier = Modifier, onToggle: () -> Unit) {
+private fun AnimatedStateText(
+    text: String,
+    modifier: Modifier = Modifier,
+    style: TextStyle = LocalTextStyle.current,
+    color: Color = Color.Unspecified,
+    fontWeight: FontWeight? = null,
+    maxLines: Int = Int.MAX_VALUE
+) {
+    AnimatedContent(
+        targetState = text,
+        transitionSpec = {
+            (fadeIn(animationSpec = tween(170)) + slideInVertically(animationSpec = tween(220, easing = FastOutSlowInEasing)) { it / 4 }) togetherWith
+                (fadeOut(animationSpec = tween(120)) + slideOutVertically(animationSpec = tween(170, easing = FastOutSlowInEasing)) { -it / 4 })
+        },
+        label = "animatedRoutingText"
+    ) { value ->
+        Text(
+            value,
+            modifier = modifier,
+            style = style,
+            color = color,
+            fontWeight = fontWeight,
+            maxLines = maxLines
+        )
+    }
+}
+
+@Composable
+private fun FadingStateText(
+    text: String,
+    modifier: Modifier = Modifier,
+    style: TextStyle = LocalTextStyle.current,
+    color: Color = Color.Unspecified,
+    fontWeight: FontWeight? = null,
+    maxLines: Int = Int.MAX_VALUE
+) {
+    AnimatedContent(
+        targetState = text,
+        transitionSpec = {
+            fadeIn(animationSpec = tween(140)) togetherWith fadeOut(animationSpec = tween(100))
+        },
+        label = "fadingRoutingText"
+    ) { value ->
+        Text(
+            value,
+            modifier = modifier,
+            style = style,
+            color = color,
+            fontWeight = fontWeight,
+            maxLines = maxLines
+        )
+    }
+}
+
+@Composable
+fun AppRow(app: AppItem, isSelected: Boolean, routingEnabled: Boolean, isWhitelist: Boolean, modifier: Modifier = Modifier, onToggle: () -> Unit) {
     val context = LocalContext.current
     var iconBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
     
@@ -260,10 +408,21 @@ fun AppRow(app: AppItem, isSelected: Boolean, modifier: Modifier = Modifier, onT
         }
     }
 
-    val animatedColor by animateColorAsState(targetValue = if (isSelected) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f), animationSpec = spring(stiffness = Spring.StiffnessLow), label = "")
+    val targetRowColor = when {
+        !routingEnabled -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.22f)
+        isSelected && isWhitelist -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.56f)
+        isSelected -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f)
+        else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+    }
+    val animatedColor by animateColorAsState(targetValue = targetRowColor, animationSpec = spring(stiffness = Spring.StiffnessLow), label = "appRowColor")
+    val rowAlpha by animateFloatAsState(
+        targetValue = if (routingEnabled) 1f else 0.72f,
+        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+        label = "appRowAlpha"
+    )
 
     Surface(
-        modifier = modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).toggleable(value = isSelected, onValueChange = { onToggle() }),
+        modifier = modifier.fillMaxWidth().alpha(rowAlpha).clip(RoundedCornerShape(20.dp)).toggleable(value = isSelected, onValueChange = { onToggle() }),
         shape = RoundedCornerShape(20.dp), color = animatedColor
     ) {
         Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {

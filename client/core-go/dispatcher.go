@@ -9,11 +9,22 @@ import (
 	"time"
 )
 
-const returnChBuf = 384
+const (
+	returnChBuf            = 384
+	schedulerProbeWindow   = 8
+	schedulerMaxScanWindow = 256
+)
 
 type WorkerSlot struct {
-	ID     int
-	SendCh chan []byte
+	ID                int
+	SendCh            chan []byte
+	QueuedPackets     int64
+	QueuedBytes       int64
+	WrittenPackets    int64
+	WrittenBytes      int64
+	ReturnedPackets   int64
+	ReturnedBytes     int64
+	LastWriteUnixNano int64
 }
 
 type Dispatcher struct {
@@ -75,6 +86,7 @@ func (d *Dispatcher) readLoop() {
 	defer d.wg.Done()
 
 	buf := make([]byte, readBufSize)
+	var schedulerScratch [schedulerMaxScanWindow]int32
 	for {
 		if err := d.ctx.Err(); err != nil {
 			return
@@ -99,28 +111,74 @@ func (d *Dispatcher) readLoop() {
 			continue
 		}
 
-		pkt := copyPacket(buf[:n])
-		sent := false
 		startIdx := d.rrIndex % nw
-		for i := 0; i < nw; i++ {
-			idx := (startIdx + i) % nw
-			w := d.workers[idx]
-			select {
-			case w.SendCh <- pkt:
-				d.rrIndex = (idx + 1) % nw
-				sent = true
-			default:
-			}
-			if sent {
-				break
-			}
+		bestIdx, bestQueued := d.pickLeastQueuedWorker(
+			startIdx,
+			minInt(nw, schedulerProbeWindow),
+			workerSendBuf+1,
+			schedulerScratch[:],
+		)
+		if bestIdx == -1 && nw > schedulerProbeWindow {
+			bestIdx, bestQueued = d.pickLeastQueuedWorker(
+				(startIdx+schedulerProbeWindow)%nw,
+				nw-schedulerProbeWindow,
+				bestQueued,
+				schedulerScratch[:],
+			)
 		}
-		if !sent {
+		if bestIdx == -1 {
 			d.rrIndex = (startIdx + 1) % nw
+			atomic.AddInt64(&d.stats.DroppedPackets, 1)
+			d.mu.Unlock()
+			continue
+		}
+
+		pkt := copyPacket(buf[:n])
+		w := d.workers[bestIdx]
+		select {
+		case w.SendCh <- pkt:
+			d.rrIndex = (bestIdx + 1) % nw
+			atomic.AddInt64(&d.stats.PacketsUp, 1)
+			atomic.AddInt64(&w.QueuedPackets, 1)
+			atomic.AddInt64(&w.QueuedBytes, int64(n))
+		default:
+			d.rrIndex = (bestIdx + 1) % nw
+			atomic.AddInt64(&d.stats.DroppedPackets, 1)
 			releasePacket(pkt)
 		}
 		d.mu.Unlock()
 	}
+}
+
+func (d *Dispatcher) pickLeastQueuedWorker(startIdx, limit, bestQueued int, scratch []int32) (int, int) {
+	nw := len(d.workers)
+	if nw == 0 || limit <= 0 || len(scratch) == 0 {
+		return -1, bestQueued
+	}
+	if limit > nw {
+		limit = nw
+	}
+
+	bestIdx := -1
+	capacity := cap(d.workers[startIdx%nw].SendCh)
+	for offset := 0; offset < limit; {
+		batchSize := minInt(limit-offset, len(scratch))
+		for i := 0; i < batchSize; i++ {
+			idx := (startIdx + offset + i) % nw
+			scratch[i] = int32(len(d.workers[idx].SendCh))
+		}
+
+		relativeIdx, queued := pickLeastQueuedByQueueLens(scratch[:batchSize], capacity, bestQueued)
+		if relativeIdx >= 0 {
+			bestIdx = (startIdx + offset + relativeIdx) % nw
+			bestQueued = queued
+		}
+		if queued == 0 {
+			break
+		}
+		offset += batchSize
+	}
+	return bestIdx, bestQueued
 }
 
 func (d *Dispatcher) writeLoop() {
@@ -133,11 +191,13 @@ func (d *Dispatcher) writeLoop() {
 		case pkt := <-d.ReturnCh:
 			addrPtr := d.clientAddr.Load()
 			if addrPtr == nil {
+				atomic.AddInt64(&d.stats.DroppedPackets, 1)
 				releasePacket(pkt)
 				continue
 			}
 			addr := *addrPtr
 			if _, err := d.localConn.WriteTo(pkt, addr); err != nil {
+				atomic.AddInt64(&d.stats.DroppedPackets, 1)
 				releasePacket(pkt)
 				if d.ctx.Err() != nil {
 					return
@@ -145,6 +205,7 @@ func (d *Dispatcher) writeLoop() {
 				continue
 			}
 			atomic.AddInt64(&d.stats.TotalBytesDown, int64(len(pkt)))
+			atomic.AddInt64(&d.stats.PacketsDown, 1)
 			releasePacket(pkt)
 		}
 	}

@@ -46,6 +46,11 @@ class TunnelService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        TunnelManager.scope.launch(Dispatchers.IO) {
+            if (SettingsStore(applicationContext).diagnosticsEnabled.first()) {
+                AppDiagnostics.start(applicationContext)
+            }
+        }
         createNotificationChannel()
         // Сразу берем лок при создании
         acquireWakeLock()

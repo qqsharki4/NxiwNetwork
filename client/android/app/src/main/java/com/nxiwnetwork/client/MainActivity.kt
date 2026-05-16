@@ -24,6 +24,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -43,7 +44,12 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -132,6 +138,11 @@ class MainActivity : ComponentActivity() {
         setupDynamicShortcuts()
 
         val settingsStore = SettingsStore(this)
+        lifecycleScope.launch(Dispatchers.IO) {
+            if (settingsStore.diagnosticsEnabled.first()) {
+                AppDiagnostics.start(applicationContext)
+            }
+        }
         val prefs = getSharedPreferences("nxiwnetwork_prefs", Context.MODE_PRIVATE)
         val isFirstLaunch = prefs.getBoolean("is_first_launch", true)
         val startupChangelogKey = buildChangelogSeenKey()
@@ -356,11 +367,10 @@ class MainActivity : ComponentActivity() {
         UpdateCheckCoordinator.setDownloadProgress(update.tagName, 0, "Скачано 0%")
         val result = runCatching {
             ReleaseUpdater.downloadUpdateFile(this, update) { progress ->
-                val percent = progress ?: 0
                 UpdateCheckCoordinator.setDownloadProgress(
                     tagName = update.tagName,
-                    progressPercent = percent,
-                    message = "Скачано $percent%"
+                    progressPercent = progress,
+                    message = progress?.let { "Скачано $it%" } ?: "Скачиваем APK..."
                 )
             }
         }
@@ -664,7 +674,11 @@ fun UpdateAvailableDialog(
     val activeDownload = downloadState?.takeIf { it.tagName == update.tagName }
     val isDownloading = activeDownload?.isActive == true
     val shownProgress = activeDownload?.progressPercent ?: if (isDownloaded) 100 else 0
-    val shownProgressMessage = activeDownload?.message ?: if (isDownloaded) "APK скачан" else "Скачано 0%"
+    val animatedProgress by animateFloatAsState(
+        targetValue = shownProgress.coerceIn(0, 100) / 100f,
+        animationSpec = tween(durationMillis = 520, easing = FastOutSlowInEasing),
+        label = "update_download_progress"
+    )
     val dialogMaxHeight = (LocalConfiguration.current.screenHeightDp.dp - 48.dp).coerceAtLeast(360.dp)
     Dialog(onDismissRequest = onClose) {
         Surface(
@@ -734,19 +748,11 @@ fun UpdateAvailableDialog(
                                 lineHeight = 20.sp
                             )
                             Column(modifier = Modifier.padding(top = 12.dp)) {
-                                if (activeDownload?.progressPercent == null && activeDownload != null) {
-                                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                                } else {
-                                    LinearProgressIndicator(
-                                        progress = { shownProgress.coerceIn(0, 100) / 100f },
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
-                                }
-                                Spacer(Modifier.height(8.dp))
-                                Text(
-                                    shownProgressMessage,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                DownloadApkProgressIndicator(
+                                    progress = animatedProgress,
+                                    isActive = isDownloading,
+                                    isIndeterminate = isDownloading && activeDownload?.progressPercent == null,
+                                    modifier = Modifier.fillMaxWidth()
                                 )
                             }
                         }
@@ -789,6 +795,81 @@ fun UpdateAvailableDialog(
                     TextButton(onClick = onLater, modifier = Modifier.weight(1f)) { Text("Позже", maxLines = 1) }
                 }
                 TextButton(onClick = onSkip, modifier = Modifier.fillMaxWidth()) { Text("Пропустить обновление", maxLines = 1) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DownloadApkProgressIndicator(
+    progress: Float,
+    isActive: Boolean,
+    isIndeterminate: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val colorScheme = MaterialTheme.colorScheme
+    val trackColor = colorScheme.surfaceVariant.copy(alpha = 0.64f)
+    val progressColor = colorScheme.primary
+    val waveColor = colorScheme.onPrimary.copy(alpha = 0.82f)
+    val indeterminateWaveColor = colorScheme.primary
+    val transition = rememberInfiniteTransition(label = "apk_download_wave")
+    val waveOffset by transition.animateFloat(
+        initialValue = -0.55f,
+        targetValue = 1.55f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1250, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "apk_download_wave_offset"
+    )
+
+    Canvas(
+        modifier = modifier
+            .height(8.dp)
+            .clip(RoundedCornerShape(999.dp))
+    ) {
+        val corner = CornerRadius(size.height / 2f, size.height / 2f)
+        drawRoundRect(
+            color = trackColor,
+            size = size,
+            cornerRadius = corner
+        )
+
+        val filledWidth = if (isIndeterminate) {
+            0f
+        } else {
+            (size.width * progress.coerceIn(0f, 1f)).coerceAtLeast(if (progress > 0f) size.height else 0f)
+        }
+        if (filledWidth > 0f) {
+            drawRoundRect(
+                color = progressColor,
+                size = Size(filledWidth, size.height),
+                cornerRadius = corner
+            )
+        }
+
+        if (isActive) {
+            val waveWidth = size.width * if (isIndeterminate) 0.38f else 0.28f
+            val startX = (size.width + waveWidth) * waveOffset - waveWidth
+            val endX = startX + waveWidth
+            val clipRight = if (isIndeterminate) size.width else filledWidth
+            if (clipRight > 0f) {
+                clipRect(left = 0f, top = 0f, right = clipRight, bottom = size.height) {
+                    drawRoundRect(
+                        brush = Brush.horizontalGradient(
+                            0f to Color.Transparent,
+                            0.42f to if (isIndeterminate) indeterminateWaveColor.copy(alpha = 0.18f) else waveColor.copy(alpha = 0.10f),
+                            0.5f to if (isIndeterminate) indeterminateWaveColor else waveColor,
+                            0.58f to if (isIndeterminate) indeterminateWaveColor.copy(alpha = 0.18f) else waveColor.copy(alpha = 0.10f),
+                            1f to Color.Transparent,
+                            startX = startX,
+                            endX = endX
+                        ),
+                        topLeft = Offset(startX, 0f),
+                        size = Size(waveWidth, size.height),
+                        cornerRadius = corner
+                    )
+                }
             }
         }
     }

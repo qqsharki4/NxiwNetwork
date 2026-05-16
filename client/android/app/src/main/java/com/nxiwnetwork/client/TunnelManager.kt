@@ -5,6 +5,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.net.TrafficStats
+import android.os.SystemClock
 import androidx.compose.runtime.Stable
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -18,7 +19,6 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
-import java.io.File
 import java.io.InputStreamReader
 
 @Stable
@@ -58,6 +58,9 @@ object TunnelManager {
     val config = MutableStateFlow<String?>(null)
     val stats = MutableStateFlow("Ожидание данных...")
     val activeWorkers = MutableStateFlow(0)
+    val activeCoreBackend = MutableStateFlow<CoreBackend?>(null)
+    val coreProcessPid = MutableStateFlow<Int?>(null)
+    val tunnelStartedAtElapsedMs = MutableStateFlow<Long?>(null)
     
     val cooldownSeconds = MutableStateFlow(0)
     private var cooldownJob: Job? = null
@@ -171,6 +174,7 @@ object TunnelManager {
             currentCaptchaMode = params.captchaMode
             currentSpeedBytes.value = 0L
             currentPingMs.value = 0
+            tunnelStartedAtElapsedMs.value = SystemClock.elapsedRealtime()
         }
         
         wgHelper = WireGuardHelper(appContext)
@@ -198,8 +202,10 @@ object TunnelManager {
                 val hashMode = if (activeHashIndex == 0) "Основной" else "Запасной"
                 updateLog("config_info", "[$hashMode] Хешей=$hashCount, Потоков=$totalWorkers, Keepalive=${keepaliveSeconds}с", 1)
 
-                val binaryPath = context.applicationInfo.nativeLibraryDir + "/libclient.so"
-                val binaryFile = File(binaryPath)
+                val settingsStore = SettingsStore(appContext)
+                val requestedBackend = CoreBackend.fromId(settingsStore.coreBackend.first())
+                val backendResolution = resolveCoreBackend(context.applicationInfo.nativeLibraryDir, requestedBackend)
+                val binaryFile = backendResolution.binaryFile
                 
                 if (!binaryFile.exists()) {
                     updateLog("binary_error", "Ошибка: Бинарный файл не найден", 99, true)
@@ -207,8 +213,18 @@ object TunnelManager {
                     updateWidgetState()
                     return@launch
                 }
+                if (backendResolution.fellBackToGo) {
+                    updateLog(
+                        "core_backend_fallback",
+                        "[ЯДРО] ${backendResolution.requested.label} не найден в APK, запускаю Go",
+                        2
+                    )
+                } else {
+                    updateLog("core_backend", "[ЯДРО] Backend: ${backendResolution.active.label}", 2)
+                }
 
                 val peerEndpoint = normalizeNodeEndpoint(params.peer)
+                val binaryPath = binaryFile.absolutePath
                 val cmd = mutableListOf(
                     binaryPath,
                     "-peer", peerEndpoint,
@@ -236,7 +252,6 @@ object TunnelManager {
                 cmd.add("-captcha-mode")
                 cmd.add(params.captchaMode)
 
-                val settingsStore = SettingsStore(appContext)
                 var userAgent = settingsStore.userAgent.first()
                 if (userAgent.isEmpty() || forceRegenerateUA) {
                     userAgent = UserAgentGenerator.generateForDevice(androidId)
@@ -255,7 +270,9 @@ object TunnelManager {
                 env["LD_LIBRARY_PATH"] = context.applicationInfo.nativeLibraryDir
 
                 process = pb.start()
+                coreProcessPid.value = process?.safePid()
                 running.value = true
+                activeCoreBackend.value = backendResolution.active
                 updateWidgetState()
                 
                 val serverIp = nodeEndpointHost(peerEndpoint).ifBlank { params.peer.substringBefore(":") }
@@ -266,6 +283,7 @@ object TunnelManager {
             } catch (e: Exception) {
                 updateLog("critical_start_error", "Критическая ошибка запуска: ${e.message}", 99, true)
                 running.value = false
+                activeCoreBackend.value = null
                 updateWidgetState()
             }
         }
@@ -480,11 +498,13 @@ object TunnelManager {
             } finally {
                 if (process === readerProcess) {
                     process = null
+                    coreProcessPid.value = null
                 }
                 if (processRestartExpected) {
                     processRestartExpected = false
                 } else {
                     running.value = false
+                    activeCoreBackend.value = null
                     updateWidgetState()
                 }
                 processStopExpected = false
@@ -602,6 +622,7 @@ object TunnelManager {
         currentPingMs.value = 0
         val proc = process
         process = null
+        coreProcessPid.value = null
         if (proc != null) {
             try { proc.destroy() } catch (_: Exception) {}
             try { proc.waitFor(500, java.util.concurrent.TimeUnit.MILLISECONDS) } catch (_: Exception) {}
@@ -612,6 +633,8 @@ object TunnelManager {
         }
         if (!keepRunning) {
             running.value = false
+            activeCoreBackend.value = null
+            tunnelStartedAtElapsedMs.value = null
             updateWidgetState()
         }
     }
@@ -630,6 +653,7 @@ object TunnelManager {
         killProcess(expectedStop = userRequested)
         activeWorkers.value = 0
         currentParams = null
+        tunnelStartedAtElapsedMs.value = null
         ManlCaptchaWebViewManager.cancelCaptcha()
     }
 
@@ -641,6 +665,7 @@ object TunnelManager {
             killProcess()
             activeWorkers.value = 0
             currentParams = null
+            tunnelStartedAtElapsedMs.value = null
             ManlCaptchaWebViewManager.cancelCaptcha()
             repeat(30) {
                 try {
@@ -710,6 +735,13 @@ object TunnelManager {
     private fun Throwable.readableMessage(): String {
         val text = message ?: localizedMessage
         return if (text.isNullOrBlank()) this::class.java.simpleName else "${this::class.java.simpleName}: $text"
+    }
+
+    private fun Process.safePid(): Int? {
+        return runCatching {
+            val pidMethod = javaClass.methods.firstOrNull { it.name == "pid" && it.parameterTypes.isEmpty() }
+            (pidMethod?.invoke(this) as? Long)?.toInt()
+        }.getOrNull()
     }
 
     fun startCooldown(seconds: Int) {
