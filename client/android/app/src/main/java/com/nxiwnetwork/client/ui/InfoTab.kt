@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.SystemClock
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
@@ -16,6 +17,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -47,6 +49,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nxiwnetwork.client.AvailableUpdate
+import com.nxiwnetwork.client.CoreBackend
 import com.nxiwnetwork.client.ReleaseUpdater
 import com.nxiwnetwork.client.filterChangelogForVersion
 import com.nxiwnetwork.client.SettingsStore
@@ -73,6 +76,8 @@ import kotlin.math.roundToInt
 private const val VK_HASH_ROW_ANIMATION_MS = 300
 private const val VK_HASH_TRASH_ANIMATION_MS = 320
 private const val UPDATE_REMIND_LATER_MS = 24L * 60L * 60L * 1000L
+private const val DEBUG_MENU_UNLOCK_TAPS = 3
+private const val DEBUG_MENU_UNLOCK_WINDOW_MS = 1300L
 private val SEGMENTED_CONTROL_HEIGHT = 40.dp
 
 private fun <S> AnimatedContentTransitionScope<S>.noContentAnimation(): ContentTransform =
@@ -393,8 +398,32 @@ fun InfoTab() {
 @Composable
 fun MainSettingsMenu(onNavigate: (String) -> Unit) {
     val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
     val appVersionName = remember(context) { readAppVersionName(context) }
+    val versionTextInteractionSource = remember { MutableInteractionSource() }
     var showImportantInfoDialog by remember { mutableStateOf(false) }
+    var versionTapCount by remember { mutableIntStateOf(0) }
+    var versionFirstTapAt by remember { mutableLongStateOf(0L) }
+
+    fun handleVersionTap() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - versionFirstTapAt > DEBUG_MENU_UNLOCK_WINDOW_MS) {
+            versionFirstTapAt = now
+            versionTapCount = 0
+        }
+
+        versionTapCount += 1
+        val remaining = DEBUG_MENU_UNLOCK_TAPS - versionTapCount
+
+        if (remaining <= 0) {
+            versionTapCount = 0
+            versionFirstTapAt = 0L
+            openDebugTools(context)
+            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+        } else {
+            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+        }
+    }
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("Настройки", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 8.dp))
@@ -411,11 +440,35 @@ fun MainSettingsMenu(onNavigate: (String) -> Unit) {
             SettingClickRow(Icons.Default.Code, "GitHub", "Исходный код") { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/qqsharki4/NxiwNetwork"))) }
         }
         
-        Column(modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("Версия $appVersionName", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.outline, fontSize = 14.sp)
+        Column(modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                "Версия $appVersionName",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.outline,
+                fontSize = 14.sp,
+                modifier = Modifier.clickable(
+                    interactionSource = versionTextInteractionSource,
+                    indication = null,
+                    role = Role.Button,
+                    onClick = { handleVersionTap() }
+                )
+            )
         }
     }
     if (showImportantInfoDialog) ImportantInfoDialog { showImportantInfoDialog = false }
+}
+
+private fun openDebugTools(context: Context) {
+    runCatching {
+        context.startActivity(
+            Intent().setClassName(
+                context.packageName,
+                "com.nxiwnetwork.client.DebugToolsActivity"
+            )
+        )
+    }.onFailure {
+        Toast.makeText(context, "Не удалось открыть debug tools", Toast.LENGTH_SHORT).show()
+    }
 }
 
 private fun normalizeUpdateChannel(channel: String): String {
@@ -515,11 +568,10 @@ private suspend fun downloadUpdate(
     UpdateCheckCoordinator.setDownloadProgress(update.tagName, 0, "Скачано 0%")
     val result = runCatching {
         ReleaseUpdater.downloadUpdateFile(context, update) { progress ->
-            val percent = progress ?: 0
             UpdateCheckCoordinator.setDownloadProgress(
                 tagName = update.tagName,
-                progressPercent = percent,
-                message = "Скачано $percent%"
+                progressPercent = progress,
+                message = progress?.let { "Скачано $it%" } ?: "Скачиваем APK..."
             )
         }
     }
@@ -609,11 +661,6 @@ private fun AvailableUpdateRow(
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
-                Text(
-                    it.message,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
             }
             FilledTonalButton(
                 onClick = onOpen,
@@ -795,12 +842,17 @@ fun UpdatesSettings(onBack: () -> Unit) {
         }
 
         CategoryCard("Доступные обновления", Icons.Default.NewReleases, animateSize = animateUpdateChanges) {
-            if (checkingUpdates && displayedUpdates.isEmpty()) {
-                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-            }
-            if (checkingUpdates && displayedUpdates.isNotEmpty()) {
-                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                Spacer(Modifier.height(12.dp))
+            AnimatedVisibility(
+                visible = checkingUpdates,
+                enter = fadeIn(tween(160, easing = FastOutSlowInEasing)) +
+                    expandVertically(tween(220, easing = FastOutSlowInEasing)),
+                exit = fadeOut(tween(120)) +
+                    shrinkVertically(tween(180, easing = FastOutSlowInEasing))
+            ) {
+                Column {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    Spacer(Modifier.height(16.dp))
+                }
             }
 
             AnimatedContent(
@@ -1048,7 +1100,11 @@ fun PerformanceSettings(onBack: () -> Unit) {
     val currentHashesFromStore by settingsStore.vkHashes.collectAsStateWithLifecycle("")
     val wifiHighPerformance by settingsStore.wifiHighPerformance.collectAsStateWithLifecycle(true)
     val keepaliveSeconds by settingsStore.clientKeepaliveSeconds.collectAsStateWithLifecycle(10)
+    val coreBackendOrNull by settingsStore.coreBackend.collectAsStateWithLifecycle(null)
+    val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
+    val activeCoreBackend by TunnelManager.activeCoreBackend.collectAsStateWithLifecycle()
     val captchaMethod = captchaMethodOrNull ?: "manual"
+    val coreBackend = CoreBackend.fromId(coreBackendOrNull)
 
     var nextHashFieldId by remember { mutableLongStateOf(1L) }
     var hashFields by remember { mutableStateOf(listOf(VkHashFieldUi(id = 0L, value = ""))) }
@@ -1117,6 +1173,7 @@ fun PerformanceSettings(onBack: () -> Unit) {
     var animateWorkersCount by remember { mutableStateOf(false) }
     var animateKeepaliveValue by remember { mutableStateOf(false) }
     var animateCaptchaSelection by remember { mutableStateOf(false) }
+    var animateCoreBackendSelection by remember { mutableStateOf(false) }
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         SettingsHeader("Производительность", onBack)
@@ -1227,6 +1284,36 @@ fun PerformanceSettings(onBack: () -> Unit) {
                 }
             }
             Text("Больше потоков — выше скорость, но сильнее расход батареи.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
+        }
+        CategoryCard("Ядро клиента", Icons.Default.DeveloperBoard, animateSize = animateCoreBackendSelection) {
+            SegmentedControlLoadSlot(loaded = coreBackendOrNull != null) {
+                SingleChoiceSegmentedButtonRow(
+                    modifier = Modifier.fillMaxWidth().height(SEGMENTED_CONTROL_HEIGHT)
+                ) {
+                    CoreBackend.selectable.forEachIndexed { index, backend ->
+                        val selected = coreBackend == backend
+                        SegmentedButton(
+                            selected = selected,
+                            shape = SegmentedButtonDefaults.itemShape(index = index, count = CoreBackend.selectable.size),
+                            icon = { SegmentedSelectionIcon(selected, animateCoreBackendSelection) },
+                            onClick = {
+                                if (!selected) {
+                                    animateCoreBackendSelection = true
+                                    if (tunnelRunning && activeCoreBackend != null && backend != activeCoreBackend) {
+                                        Toast.makeText(
+                                            context,
+                                            "Изменения применятся после перезапуска туннеля",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
+                                }
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                scope.launch { settingsStore.saveCoreBackend(backend.id) }
+                            }
+                        ) { Text(backend.label, fontSize = 14.sp) }
+                    }
+                }
+            }
         }
         CategoryCard("Энергия и фон", Icons.Default.BatterySaver) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {

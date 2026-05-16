@@ -1,6 +1,7 @@
 # ===== Gradle =====
 .gradle/
 build/
+client/core-rs/target/
 client/android/local.properties
 server/deploy/.env
 server/deploy/data/

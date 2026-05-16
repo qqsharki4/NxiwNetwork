@@ -45,6 +45,7 @@ class SettingsStore(context: Context) {
         private val CUSTOM_DNS = stringPreferencesKey("custom_dns")
         private val WIFI_HIGH_PERFORMANCE = booleanPreferencesKey("wifi_high_performance")
         private val CLIENT_KEEPALIVE_SECONDS = intPreferencesKey("client_keepalive_seconds")
+        private val CORE_BACKEND = stringPreferencesKey("core_backend")
         private val UPDATE_CHANNEL = stringPreferencesKey("update_channel")
         private val UPDATE_SKIPPED_BY_CHANNEL = stringPreferencesKey("update_skipped_by_channel")
         private val UPDATE_LATER_UNTIL_BY_CHANNEL = stringPreferencesKey("update_later_until_by_channel")
@@ -55,6 +56,10 @@ class SettingsStore(context: Context) {
         private val UPDATE_LAST_CHECK_AT = stringPreferencesKey("update_last_check_at")
         private val UPDATE_RATE_LIMIT_UNTIL = stringPreferencesKey("update_rate_limit_until")
         private val UPDATE_AVAILABLE_CACHE = stringPreferencesKey("update_available_cache")
+        private val DIAGNOSTICS_ENABLED = booleanPreferencesKey("diagnostics_enabled")
+        private val DIAGNOSTICS_PROCESS_METRICS = booleanPreferencesKey("diagnostics_process_metrics")
+        private val DIAGNOSTICS_TRAFFIC_METRICS = booleanPreferencesKey("diagnostics_traffic_metrics")
+        private val DIAGNOSTICS_BATTERY_METRICS = booleanPreferencesKey("diagnostics_battery_metrics")
 
         // НОВЫЙ КЛЮЧ ДЛЯ MTU
         private val CUSTOM_MTU = intPreferencesKey("custom_mtu")
@@ -92,10 +97,15 @@ class SettingsStore(context: Context) {
     val customDns: Flow<String> = dataStore.data.map { it[CUSTOM_DNS] ?: "default" }
     val wifiHighPerformance: Flow<Boolean> = dataStore.data.map { it[WIFI_HIGH_PERFORMANCE] ?: true }
     val clientKeepaliveSeconds: Flow<Int> = dataStore.data.map { it[CLIENT_KEEPALIVE_SECONDS] ?: 10 }
+    val coreBackend: Flow<String> = dataStore.data.map { CoreBackend.normalize(it[CORE_BACKEND]) }
     val updateChannel: Flow<String> = dataStore.data.map { it[UPDATE_CHANNEL] ?: "stable" }
     val updateLastStatus: Flow<String> = dataStore.data.map { it[UPDATE_LAST_STATUS] ?: "Обновления еще не проверялись" }
     val updateLastCheckAt: Flow<Long> = dataStore.data.map { it[UPDATE_LAST_CHECK_AT]?.toLongOrNull() ?: 0L }
     val updateRateLimitUntil: Flow<Long> = dataStore.data.map { it[UPDATE_RATE_LIMIT_UNTIL]?.toLongOrNull() ?: 0L }
+    val diagnosticsEnabled: Flow<Boolean> = dataStore.data.map { it[DIAGNOSTICS_ENABLED] ?: false }
+    val diagnosticsProcessMetrics: Flow<Boolean> = dataStore.data.map { it[DIAGNOSTICS_PROCESS_METRICS] ?: true }
+    val diagnosticsTrafficMetrics: Flow<Boolean> = dataStore.data.map { it[DIAGNOSTICS_TRAFFIC_METRICS] ?: true }
+    val diagnosticsBatteryMetrics: Flow<Boolean> = dataStore.data.map { it[DIAGNOSTICS_BATTERY_METRICS] ?: true }
 
     // НОВЫЙ FLOW ДЛЯ MTU (0 = Авто)
     val customMtu: Flow<Int> = dataStore.data.map { it[CUSTOM_MTU] ?: 0 }
@@ -126,6 +136,7 @@ class SettingsStore(context: Context) {
     suspend fun saveCustomDns(dns: String) { dataStore.edit { prefs -> prefs[CUSTOM_DNS] = dns } }
     suspend fun saveWifiHighPerformance(enabled: Boolean) { dataStore.edit { prefs -> prefs[WIFI_HIGH_PERFORMANCE] = enabled } }
     suspend fun saveClientKeepaliveSeconds(seconds: Int) { dataStore.edit { prefs -> prefs[CLIENT_KEEPALIVE_SECONDS] = seconds.coerceIn(5, 60) } }
+    suspend fun saveCoreBackend(backend: String) { dataStore.edit { prefs -> prefs[CORE_BACKEND] = CoreBackend.normalize(backend) } }
     suspend fun saveUpdateChannel(channel: String) {
         val normalized = when (channel.lowercase()) {
             "pre", "dev" -> channel.lowercase()
@@ -152,6 +163,10 @@ class SettingsStore(context: Context) {
     suspend fun saveUpdateStatus(status: String) { dataStore.edit { prefs -> prefs[UPDATE_LAST_STATUS] = status } }
     suspend fun getUpdateRateLimitUntil(): Long = dataStore.data.first()[UPDATE_RATE_LIMIT_UNTIL]?.toLongOrNull() ?: 0L
     suspend fun saveUpdateRateLimitUntil(untilMillis: Long) { dataStore.edit { prefs -> prefs[UPDATE_RATE_LIMIT_UNTIL] = untilMillis.toString() } }
+    suspend fun saveDiagnosticsEnabled(enabled: Boolean) { dataStore.edit { prefs -> prefs[DIAGNOSTICS_ENABLED] = enabled } }
+    suspend fun saveDiagnosticsProcessMetrics(enabled: Boolean) { dataStore.edit { prefs -> prefs[DIAGNOSTICS_PROCESS_METRICS] = enabled } }
+    suspend fun saveDiagnosticsTrafficMetrics(enabled: Boolean) { dataStore.edit { prefs -> prefs[DIAGNOSTICS_TRAFFIC_METRICS] = enabled } }
+    suspend fun saveDiagnosticsBatteryMetrics(enabled: Boolean) { dataStore.edit { prefs -> prefs[DIAGNOSTICS_BATTERY_METRICS] = enabled } }
     suspend fun getCachedAvailableUpdates(): List<AvailableUpdate> {
         return ReleaseUpdater.decodeAvailableUpdates(dataStore.data.first()[UPDATE_AVAILABLE_CACHE].orEmpty())
     }

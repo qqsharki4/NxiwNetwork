@@ -3,6 +3,8 @@ package com.nxiwnetwork.client.ui
 import android.content.Context
 import android.content.Intent
 import android.app.Activity
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.Build
 import android.widget.Toast
@@ -39,6 +41,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -52,6 +55,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -59,6 +64,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nxiwnetwork.client.DEFAULT_NODE_PORT
+import com.nxiwnetwork.client.CoreBackend
 import com.nxiwnetwork.client.isValidNodeAddress
 import com.nxiwnetwork.client.nodeEndpointHost
 import com.nxiwnetwork.client.nodeEndpointPort
@@ -67,13 +73,14 @@ import com.nxiwnetwork.client.normalizeNodeEndpoint
 import com.nxiwnetwork.client.SettingsStore
 import com.nxiwnetwork.client.TunnelManager
 import com.nxiwnetwork.client.TunnelService
+import com.nxiwnetwork.client.resolveCoreBackend
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.File
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.Collections
@@ -392,28 +399,17 @@ fun SettingsTab() {
                         SpeedGraphCard(isRunning = tunnelRunning, currentSpeedBytes = currentSpeed, modifier = Modifier.height(160.dp))
                     } else {
                         DashboardCard(title = widget.title, icon = widget.icon, modifier = Modifier.height(130.dp)) {
-                            AnimatedContent(
-                                targetState = when (widget) {
-                                    WidgetType.PING -> if (tunnelRunning && currentPing > 0) "${currentPing}ms" else "--"
-                                    WidgetType.SESSION -> if (tunnelRunning) timerString else "00:00"
-                                    WidgetType.WORKERS -> "$activeWorkers"
-                                    WidgetType.SPEED -> {
-                                        val speedKb = currentSpeed / 1024f
-                                        if (tunnelRunning) if (speedKb > 1024) String.format("%.1f MB/s", speedKb / 1024f) else String.format("%.0f KB/s", speedKb) else "0 KB/s"
-                                    }
-                                    else -> ""
-                                },
-                                transitionSpec = {
-                                    if (targetState != "--" && targetState != "0 KB/s" && targetState != "00:00") {
-                                        slideInVertically(spring(stiffness = Spring.StiffnessMediumLow)) { it } + fadeIn(tween(200)) togetherWith 
-                                        slideOutVertically(spring(stiffness = Spring.StiffnessMediumLow)) { -it } + fadeOut(tween(200))
-                                    } else {
-                                        fadeIn(tween(300)) togetherWith fadeOut(tween(300))
-                                    }
-                                }, label = ""
-                            ) { value -> 
-                                Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, fontSize = 20.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) 
+                            val value = when (widget) {
+                                WidgetType.PING -> if (tunnelRunning && currentPing > 0) "${currentPing} ms" else "--"
+                                WidgetType.SESSION -> if (tunnelRunning) timerString else "00:00"
+                                WidgetType.WORKERS -> "$activeWorkers"
+                                WidgetType.SPEED -> {
+                                    val speedKb = currentSpeed / 1024f
+                                    if (tunnelRunning) if (speedKb > 1024) String.format("%.1f MB/s", speedKb / 1024f) else String.format("%.0f KB/s", speedKb) else "0 KB/s"
+                                }
+                                else -> ""
                             }
+                            AnimatedDashboardValue(value)
                         }
                     }
                     
@@ -511,8 +507,9 @@ fun DiagnosticDialog(context: Context, peer: String, hashes: String, onDismiss: 
             val ip = nodeEndpointHost(peer)
             val nodePort = nodeEndpointPort(peer, DEFAULT_NODE_PORT)
             
-            // 1. Доступность интернета (DNS Google)
-            val internetOk = try { Socket().use { it.connect(InetSocketAddress("8.8.8.8", 53), 1500) }; true } catch (e: Exception) { false }
+            // 1. Доступность интернета. При активном туннеле учитываем VPN network и живые воркеры:
+            // само приложение исключено из VPN, поэтому прямой сокет из UI-процесса может дать ложный минус.
+            val internetOk = checkInternetAccess(context, preferTunnel = TunnelManager.running.value)
             results = results.toMutableList().apply { set(0, internetOk) }; step = 1
 
             // 2. Доступность ноды (Ping или TCP fallback)
@@ -538,8 +535,9 @@ fun DiagnosticDialog(context: Context, peer: String, hashes: String, onDismiss: 
             val hashValid = hashes.isNotBlank() && hashes.split(",").any { it.trim().length > 20 }
             results = results.toMutableList().apply { set(2, hashValid) }; step = 3
 
-            // 4. Готовность (наличие бинарника)
-            val coreOk = File(context.applicationInfo.nativeLibraryDir + "/libclient.so").exists()
+            // 4. Готовность выбранного ядра или Go fallback
+            val requestedBackend = CoreBackend.fromId(SettingsStore(context).coreBackend.first())
+            val coreOk = resolveCoreBackend(context.applicationInfo.nativeLibraryDir, requestedBackend).binaryFile.exists()
             delay(500)
             results = results.toMutableList().apply { set(3, coreOk) }; step = 4
         }
@@ -568,6 +566,56 @@ fun DiagnosticDialog(context: Context, peer: String, hashes: String, onDismiss: 
             }
         }
     }
+}
+
+private fun checkInternetAccess(context: Context, preferTunnel: Boolean): Boolean {
+    fun canConnect(socketFactory: javax.net.SocketFactory? = null, timeoutMs: Int): Boolean {
+        val targets = listOf(
+            InetSocketAddress("1.1.1.1", 443),
+            InetSocketAddress("1.0.0.1", 443),
+            InetSocketAddress("8.8.8.8", 443)
+        )
+        return targets.any { target ->
+            try {
+                val socket = socketFactory?.createSocket() ?: Socket()
+                socket.use { it.connect(target, timeoutMs) }
+                true
+            } catch (_: Exception) {
+                false
+            }
+        }
+    }
+
+    if (preferTunnel) {
+        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val vpnNetworks = connectivityManager.allNetworks.mapNotNull { network ->
+            val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return@mapNotNull null
+            if (
+                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
+                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            ) {
+                network to capabilities
+            } else {
+                null
+            }
+        }
+
+        if (vpnNetworks.isEmpty()) {
+            return false
+        }
+
+        if (vpnNetworks.any { (_, capabilities) -> capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) }) {
+            return true
+        }
+
+        if (vpnNetworks.any { (network, _) -> canConnect(network.socketFactory, timeoutMs = 2200) }) {
+            return true
+        }
+
+        return TunnelManager.activeWorkers.value > 0
+    }
+
+    return canConnect(timeoutMs = 1500)
 }
 
 @Composable
@@ -626,10 +674,42 @@ fun DashboardCard(title: String, icon: ImageVector, modifier: Modifier = Modifie
 }
 
 @Composable
+private fun AnimatedDashboardValue(value: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        value.forEachIndexed { index, char ->
+            key(index) {
+                AnimatedContent(
+                    targetState = char,
+                    transitionSpec = {
+                        if (targetState.isDigit() && initialState.isDigit()) {
+                            slideInVertically(spring(stiffness = Spring.StiffnessMediumLow)) { it } + fadeIn(tween(160)) togetherWith
+                                slideOutVertically(spring(stiffness = Spring.StiffnessMediumLow)) { -it } + fadeOut(tween(160))
+                        } else {
+                            fadeIn(tween(120)) togetherWith fadeOut(tween(90))
+                        }
+                    },
+                    label = "dashboard_value_char_$index"
+                ) { animatedChar ->
+                    Text(
+                        animatedChar.toString(),
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 20.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Clip
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun AddEditServerDialog(server: NxiwNetworkServer, onDismiss: () -> Unit, onSave: (NxiwNetworkServer) -> Unit, onDelete: () -> Unit) {
     var name by remember { mutableStateOf(server.name) }
     var ip by remember { mutableStateOf(server.ip) }
     var pass by remember { mutableStateOf(server.password) }
+    var passVisible by remember(server.id) { mutableStateOf(false) }
     val isNew = server.name.isBlank()
     val addressValid = ip.isBlank() || isValidNodeAddress(ip)
     Dialog(onDismissRequest = onDismiss) {
@@ -654,13 +734,62 @@ fun AddEditServerDialog(server: NxiwNetworkServer, onDismiss: () -> Unit, onSave
                         null
                     }
                 )
-                OutlinedTextField(value = pass, onValueChange = { pass = it.filter { c -> !c.isWhitespace() } }, label = { Text("Пароль от туннеля", fontSize = 14.sp) }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp))
+                OutlinedTextField(
+                    value = pass,
+                    onValueChange = { pass = it.filter { c -> !c.isWhitespace() } },
+                    label = { Text("Пароль от туннеля", fontSize = 14.sp) },
+                    singleLine = true,
+                    visualTransformation = if (passVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { passVisible = !passVisible }) {
+                            NodePasswordVisibilityIcon(hidden = !passVisible)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().animateContentSize(animationSpec = spring(stiffness = Spring.StiffnessMediumLow)),
+                    shape = RoundedCornerShape(16.dp)
+                )
                 Button(
                     onClick = { onSave(server.copy(name = name, ip = normalizeNodeAddressForStorage(ip), password = pass)) },
                     enabled = name.isNotBlank() && ip.isNotBlank() && addressValid,
                     modifier = Modifier.fillMaxWidth().height(56.dp),
                     shape = RoundedCornerShape(20.dp)
                 ) { Text("Сохранить", fontWeight = FontWeight.Bold, fontSize = 16.sp) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NodePasswordVisibilityIcon(hidden: Boolean) {
+    val slashProgress by animateFloatAsState(
+        targetValue = if (hidden) 1f else 0f,
+        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+        label = "nodePasswordSlashProgress"
+    )
+    val eyeColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val slashColor = Color.Gray
+
+    Box(modifier = Modifier.size(24.dp), contentAlignment = Alignment.Center) {
+        Icon(
+            imageVector = Icons.Default.Visibility,
+            contentDescription = if (hidden) "Показать пароль" else "Скрыть пароль",
+            tint = eyeColor
+        )
+        Canvas(modifier = Modifier.matchParentSize()) {
+            if (slashProgress > 0.01f) {
+                val start = Offset(size.width * 0.18f, size.height * 0.18f)
+                val end = Offset(size.width * 0.82f, size.height * 0.82f)
+                val current = Offset(
+                    x = start.x + (end.x - start.x) * slashProgress,
+                    y = start.y + (end.y - start.y) * slashProgress
+                )
+                drawLine(
+                    color = slashColor.copy(alpha = slashProgress),
+                    start = start,
+                    end = current,
+                    strokeWidth = 2.4.dp.toPx(),
+                    cap = StrokeCap.Round
+                )
             }
         }
     }

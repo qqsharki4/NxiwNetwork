@@ -28,8 +28,8 @@ android {
         applicationId = "com.nxiwnetwork.client"
         minSdk = 29
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1.0-dev.2"
+        versionCode = 3
+        versionName = "1.1.0-dev.3"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
@@ -88,7 +88,7 @@ android {
 
     sourceSets {
         getByName("main") {
-            jniLibs.srcDir(layout.buildDirectory.dir("generated/goJniLibs"))
+            jniLibs.srcDir(layout.buildDirectory.dir("generated/coreJniLibs"))
         }
     }
 
@@ -116,8 +116,10 @@ android {
     }
 }
 
-val goCoreDir = rootProject.projectDir.resolve("../core").canonicalFile
-val generatedGoJniLibsDir = layout.buildDirectory.dir("generated/goJniLibs")
+val goCoreDir = rootProject.projectDir.resolve("../core-go").canonicalFile
+val rustCoreDir = rootProject.projectDir.resolve("../core-rs").canonicalFile
+val generatedCoreJniLibsDir = layout.buildDirectory.dir("generated/coreJniLibs")
+val rustCargoTargetDir = layout.buildDirectory.dir("cargo/core-rs")
 val androidSdkDirProvider = providers.environmentVariable("ANDROID_HOME")
     .orElse(providers.environmentVariable("ANDROID_SDK_ROOT"))
     .orElse("/home/shark/Android/Sdk")
@@ -129,7 +131,7 @@ fun registerGoClientBuildTask(
     goArm: String?,
     clangPrefix: String
 ) = tasks.register<Exec>(taskName) {
-    val outputFile = generatedGoJniLibsDir.map { it.file("$abi/libclient.so") }
+    val outputFile = generatedCoreJniLibsDir.map { it.file("$abi/libcore_go.so") }
     val sdkDir = androidSdkDirProvider
     val llvmBin = sdkDir.map { "$it/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin" }
 
@@ -160,6 +162,7 @@ fun registerGoClientBuildTask(
     commandLine(
         "go",
         "build",
+        "-buildvcs=false",
         "-trimpath",
         "-buildmode=pie",
         "-ldflags=-s -w -checklinkname=0",
@@ -167,6 +170,67 @@ fun registerGoClientBuildTask(
         outputFile.get().asFile.absolutePath,
         "."
     )
+}
+
+fun registerRustClientBuildTask(
+    taskName: String,
+    abi: String,
+    rustTarget: String,
+    clangPrefix: String
+) = tasks.register<Exec>(taskName) {
+    val outputFile = generatedCoreJniLibsDir.map { it.file("$abi/libcore_rs.so") }
+    val sdkDir = androidSdkDirProvider
+    val llvmBin = sdkDir.map { "$it/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin" }
+    val linkerEnvName = "CARGO_TARGET_${rustTarget.uppercase().replace("-", "_")}_LINKER"
+    val cargoTargetDir = rustCargoTargetDir
+
+    group = "build"
+    description = "Build Rust client core for Android $abi"
+    workingDir = rustCoreDir
+
+    inputs.files(
+        fileTree(rustCoreDir) {
+            include("Cargo.toml", "Cargo.lock", "build.rs", "src/**", "native/**")
+        }
+    )
+    outputs.file(outputFile)
+
+    doFirst {
+        val ccFile = file("${llvmBin.get()}/$clangPrefix-clang")
+        if (!ccFile.exists()) {
+            throw GradleException("Android NDK 26.1.10909125 is required. Missing: ${ccFile.absolutePath}")
+        }
+        outputFile.get().asFile.parentFile.mkdirs()
+    }
+
+    environment("CC", "${llvmBin.get()}/$clangPrefix-clang")
+    environment("CXX", "${llvmBin.get()}/$clangPrefix-clang++")
+    environment("AR", "${llvmBin.get()}/llvm-ar")
+    environment(linkerEnvName, "${llvmBin.get()}/$clangPrefix-clang")
+    environment("CARGO_TARGET_DIR", cargoTargetDir.get().asFile.absolutePath)
+
+    commandLine(
+        "cargo",
+        "build",
+        "--locked",
+        "--release",
+        "--target",
+        rustTarget,
+        "--bin",
+        "client_rs"
+    )
+
+    doLast {
+        val builtBinary = cargoTargetDir.get().asFile.resolve("$rustTarget/release/client_rs")
+        if (!builtBinary.exists()) {
+            throw GradleException("Rust core build did not produce ${builtBinary.absolutePath}")
+        }
+        builtBinary.copyTo(outputFile.get().asFile, overwrite = true)
+        exec {
+            commandLine("${llvmBin.get()}/llvm-strip", "--strip-unneeded", outputFile.get().asFile.absolutePath)
+        }
+        outputFile.get().asFile.setExecutable(true, false)
+    }
 }
 
 val buildGoClientArm64 = registerGoClientBuildTask(
@@ -185,8 +249,22 @@ val buildGoClientArmv7 = registerGoClientBuildTask(
     clangPrefix = "armv7a-linux-androideabi29"
 )
 
+val buildRustClientArm64 = registerRustClientBuildTask(
+    taskName = "buildRustClientArm64",
+    abi = "arm64-v8a",
+    rustTarget = "aarch64-linux-android",
+    clangPrefix = "aarch64-linux-android29"
+)
+
+val buildRustClientArmv7 = registerRustClientBuildTask(
+    taskName = "buildRustClientArmv7",
+    abi = "armeabi-v7a",
+    rustTarget = "armv7-linux-androideabi",
+    clangPrefix = "armv7a-linux-androideabi29"
+)
+
 tasks.matching { it.name.startsWith("merge") && it.name.endsWith("JniLibFolders") }.configureEach {
-    dependsOn(buildGoClientArm64, buildGoClientArmv7)
+    dependsOn(buildGoClientArm64, buildGoClientArmv7, buildRustClientArm64, buildRustClientArmv7)
 }
 
 dependencies {

@@ -1,6 +1,11 @@
 package com.nxiwnetwork.client.ui
 
-import androidx.compose.foundation.clickable
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -12,19 +17,15 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Dns
-import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -159,7 +160,6 @@ fun NodesListSection(modifier: Modifier = Modifier) {
                                 }
                             },
                             onEdit = {
-                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                 serverToEdit = server
                             }
                         )
@@ -225,6 +225,7 @@ fun NodesListSection(modifier: Modifier = Modifier) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun NodeListItem(
     server: NxiwNetworkServer,
@@ -232,28 +233,47 @@ private fun NodeListItem(
     onClick: () -> Unit,
     onEdit: () -> Unit
 ) {
+    val haptic = LocalHapticFeedback.current
     val itemInteractionSource = remember { MutableInteractionSource() }
-    val containerColor = if (selected) {
-        MaterialTheme.colorScheme.primaryContainer
-    } else {
-        MaterialTheme.colorScheme.surfaceContainerHigh
-    }
-    val contentColor = if (selected) {
-        MaterialTheme.colorScheme.onPrimaryContainer
-    } else {
-        MaterialTheme.colorScheme.onSurface
-    }
+    val shape = RoundedCornerShape(24.dp)
+    val containerColor by animateColorAsState(
+        targetValue = if (selected) MaterialTheme.colorScheme.surfaceContainerHighest else MaterialTheme.colorScheme.surfaceContainerHigh,
+        animationSpec = tween(durationMillis = 180),
+        label = "nodeContainerColor"
+    )
+    val borderColor by animateColorAsState(
+        targetValue = MaterialTheme.colorScheme.primary.copy(alpha = if (selected) 0.72f else 0f),
+        animationSpec = tween(durationMillis = 180),
+        label = "nodeBorderColor"
+    )
+    val iconTint by animateColorAsState(
+        targetValue = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+        animationSpec = tween(durationMillis = 180),
+        label = "nodeIconTint"
+    )
+    val tonalElevation by animateDpAsState(
+        targetValue = if (selected) 2.dp else 0.dp,
+        animationSpec = tween(durationMillis = 180),
+        label = "nodeTonalElevation"
+    )
+    val contentColor = MaterialTheme.colorScheme.onSurface
 
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(
+            .combinedClickable(
                 interactionSource = itemInteractionSource,
                 indication = null,
-                onClick = onClick
+                onClick = onClick,
+                onLongClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onEdit()
+                }
             ),
-        shape = RoundedCornerShape(24.dp),
-        color = containerColor
+        shape = shape,
+        color = containerColor,
+        tonalElevation = tonalElevation,
+        border = BorderStroke(1.4.dp, borderColor)
     ) {
         Row(
             modifier = Modifier.padding(16.dp),
@@ -262,7 +282,7 @@ private fun NodeListItem(
             Icon(
                 imageVector = Icons.Default.Dns,
                 contentDescription = null,
-                tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                tint = iconTint
             )
             Spacer(modifier = Modifier.width(16.dp))
             Column(modifier = Modifier.weight(1f)) {
@@ -277,32 +297,9 @@ private fun NodeListItem(
                 Text(
                     text = server.ip,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = if (selected) {
-                        MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
-                )
-            }
-            Spacer(modifier = Modifier.width(8.dp))
-            if (selected) {
-                Icon(
-                    imageVector = Icons.Default.CheckCircle,
-                    contentDescription = "Выбрана",
-                    tint = MaterialTheme.colorScheme.primary
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-            }
-            IconButton(
-                onClick = onEdit,
-                modifier = Modifier.size(48.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Edit,
-                    contentDescription = "Изменить ноду",
-                    tint = MaterialTheme.colorScheme.primary
                 )
             }
         }

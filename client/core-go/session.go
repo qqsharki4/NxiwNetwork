@@ -343,6 +343,9 @@ func RunSession(
 					return
 				}
 				lastPayloadWrite = now
+				atomic.AddInt64(&slot.WrittenPackets, 1)
+				atomic.AddInt64(&slot.WrittenBytes, int64(len(pkt)))
+				atomic.StoreInt64(&slot.LastWriteUnixNano, now.UnixNano())
 				releasePacket(pkt)
 			}
 		}
@@ -380,6 +383,8 @@ func RunSession(
 			pkt := copyPacket(b[:n])
 			select {
 			case d.ReturnCh <- pkt:
+				atomic.AddInt64(&slot.ReturnedPackets, 1)
+				atomic.AddInt64(&slot.ReturnedBytes, int64(n))
 			case <-sessCtx.Done():
 				releasePacket(pkt)
 				return
