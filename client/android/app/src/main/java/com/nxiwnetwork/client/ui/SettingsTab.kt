@@ -7,6 +7,7 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.Build
+import android.os.SystemClock
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -163,6 +164,7 @@ fun SettingsTab() {
 
     val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
     val cooldownSeconds by TunnelManager.cooldownSeconds.collectAsStateWithLifecycle()
+    val tunnelStartedAtElapsedMs by TunnelManager.tunnelStartedAtElapsedMs.collectAsStateWithLifecycle()
     val currentPing by TunnelManager.currentPingMs.collectAsStateWithLifecycle()
     val currentUploadSpeed by TunnelManager.currentUploadSpeedBytes.collectAsStateWithLifecycle()
     val currentDownloadSpeed by TunnelManager.currentDownloadSpeedBytes.collectAsStateWithLifecycle()
@@ -222,13 +224,22 @@ fun SettingsTab() {
     }
 
     var showDiagnosticDialog by remember { mutableStateOf(false) }
-    var sessionSeconds by rememberSaveable { mutableIntStateOf(0) }
+    var sessionTickerMs by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
     var isEditMode by rememberSaveable { mutableStateOf(false) }
 
-    LaunchedEffect(tunnelRunning) {
-        if (tunnelRunning) { while (true) { delay(1000); sessionSeconds++ } } else sessionSeconds = 0
+    LaunchedEffect(tunnelRunning, tunnelStartedAtElapsedMs) {
+        while (tunnelRunning && tunnelStartedAtElapsedMs != null) {
+            sessionTickerMs = SystemClock.elapsedRealtime()
+            delay(1000)
+        }
+        sessionTickerMs = SystemClock.elapsedRealtime()
     }
 
+    val sessionSeconds = if (tunnelRunning) {
+        ((sessionTickerMs - (tunnelStartedAtElapsedMs ?: sessionTickerMs)) / 1000L).coerceAtLeast(0L)
+    } else {
+        0L
+    }
     val timerString = String.format("%02d:%02d:%02d", sessionSeconds / 3600, (sessionSeconds % 3600) / 60, sessionSeconds % 60)
 
     fun updateWidgetOrder(newList: List<WidgetType>) {
