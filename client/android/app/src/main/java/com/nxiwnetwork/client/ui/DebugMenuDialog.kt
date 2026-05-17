@@ -71,6 +71,11 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
     val diagnosticsProcessMetrics by settingsStore.diagnosticsProcessMetrics.collectAsStateWithLifecycle(true)
     val diagnosticsTrafficMetrics by settingsStore.diagnosticsTrafficMetrics.collectAsStateWithLifecycle(true)
     val diagnosticsBatteryMetrics by settingsStore.diagnosticsBatteryMetrics.collectAsStateWithLifecycle(true)
+    val dashboardWidgetsRaw by settingsStore.dashboardWidgets.collectAsStateWithLifecycle(SettingsStore.DEFAULT_DASHBOARD_WIDGETS)
+    val coreTrafficMetricsUi by settingsStore.coreTrafficMetricsUi.collectAsStateWithLifecycle(true)
+    val pingMetricsUi by settingsStore.pingMetricsUi.collectAsStateWithLifecycle(true)
+    val speedMetricModeRaw by settingsStore.speedMetricMode.collectAsStateWithLifecycle(SettingsStore.DEFAULT_SPEED_METRIC_MODE)
+    val graphSpeedMetricModeRaw by settingsStore.graphSpeedMetricMode.collectAsStateWithLifecycle(SettingsStore.DEFAULT_SPEED_METRIC_MODE)
     val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
     val activeBackend by TunnelManager.activeCoreBackend.collectAsStateWithLifecycle()
     val activeWorkers by TunnelManager.activeWorkers.collectAsStateWithLifecycle()
@@ -91,6 +96,9 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
         listOf(Build.MANUFACTURER, Build.MODEL).filter { it.isNotBlank() }.joinToString(" ").ifBlank { "unknown" }
     }
     val dnsLabel = if (dnsMode == "custom") "$dnsMode ($customDnsIp)" else dnsMode
+    val dashboardWidgets = remember(dashboardWidgetsRaw) { parseDashboardWidgets(dashboardWidgetsRaw) }
+    val speedMetricMode = parseSpeedMetricMode(speedMetricModeRaw)
+    val graphSpeedMetricMode = parseSpeedMetricMode(graphSpeedMetricModeRaw)
 
     fun copyDebugText(label: String, text: String, toast: String) {
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -101,6 +109,15 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
     fun openSystemIntent(intent: Intent, errorText: String) {
         runCatching { context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
             .onFailure { Toast.makeText(context, errorText, Toast.LENGTH_SHORT).show() }
+    }
+
+    fun setDashboardWidget(widget: WidgetType, enabled: Boolean) {
+        val updated = if (enabled) {
+            (dashboardWidgets + widget).distinct()
+        } else {
+            dashboardWidgets - widget
+        }
+        scope.launch { settingsStore.saveDashboardWidgets(encodeDashboardWidgets(updated)) }
     }
 
     val snapshot = remember(
@@ -127,6 +144,11 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
         autoConnectOnBoot,
         useDynamicColor,
         updateChannel,
+        dashboardWidgetsRaw,
+        coreTrafficMetricsUi,
+        pingMetricsUi,
+        speedMetricModeRaw,
+        graphSpeedMetricModeRaw,
         diagnostics
     ) {
         buildDebugSnapshot(
@@ -155,6 +177,11 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
             autoConnectOnBoot = autoConnectOnBoot,
             useDynamicColor = useDynamicColor,
             updateChannel = updateChannel,
+            dashboardWidgets = dashboardWidgets,
+            coreTrafficMetricsUi = coreTrafficMetricsUi,
+            pingMetricsUi = pingMetricsUi,
+            speedMetricMode = speedMetricMode,
+            graphSpeedMetricMode = graphSpeedMetricMode,
             diagnostics = diagnostics
         )
     }
@@ -233,6 +260,32 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
                     DebugSwitchRow("Батарея", "Заряд, температура, напряжение, ток, источник питания если устройство отдает эти данные.", diagnosticsBatteryMetrics) { enabled ->
                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                         scope.launch { settingsStore.saveDiagnosticsBatteryMetrics(enabled) }
+                    }
+
+                    DebugSectionTitle("Виджеты главной")
+                    DebugSwitchRow("Core traffic metrics в UI", "Если выключить, приложение перестанет прокидывать скорость/график из ядра в интерфейс. Ядро продолжит считать метрики.", coreTrafficMetricsUi) { enabled ->
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        TunnelManager.setCoreTrafficMetricsUiEnabled(enabled)
+                        scope.launch { settingsStore.saveCoreTrafficMetricsUi(enabled) }
+                    }
+                    DebugSwitchRow("Ping-метрика", "Если выключить, приложение перестанет делать системный ping до ноды для виджета пинга.", pingMetricsUi) { enabled ->
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        TunnelManager.setPingMetricsEnabled(enabled)
+                        scope.launch { settingsStore.savePingMetricsUi(enabled) }
+                    }
+                    DebugSpeedMetricModeRow("Что показывает виджет скорости", "Режим для карточки «Скорость».", speedMetricMode) { mode ->
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        scope.launch { settingsStore.saveSpeedMetricMode(mode.id) }
+                    }
+                    DebugSpeedMetricModeRow("Что показывает график скорости", "Режим для линии графика «Трафик сети».", graphSpeedMetricMode) { mode ->
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        scope.launch { settingsStore.saveGraphSpeedMetricMode(mode.id) }
+                    }
+                    WidgetType.entries.forEach { widget ->
+                        DebugSwitchRow(widget.title, "Показывать виджет на главном экране.", dashboardWidgets.contains(widget)) { enabled ->
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            setDashboardWidget(widget, enabled)
+                        }
                     }
 
                     DebugSectionTitle("Переключатели")
@@ -640,6 +693,35 @@ private fun DebugSwitchRow(title: String, description: String, checked: Boolean,
 }
 
 @Composable
+private fun DebugSpeedMetricModeRow(
+    title: String,
+    description: String,
+    selectedMode: SpeedMetricMode,
+    onSelected: (SpeedMetricMode) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp)
+    ) {
+        Text(title, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(3.dp))
+        Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 17.sp)
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SpeedMetricMode.entries.forEach { mode ->
+                FilterChip(
+                    selected = selectedMode == mode,
+                    onClick = { onSelected(mode) },
+                    label = { Text(mode.chipLabel) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun DebugToolButton(
     icon: ImageVector,
     title: String,
@@ -695,6 +777,11 @@ private fun buildDebugSnapshot(
     autoConnectOnBoot: Boolean,
     useDynamicColor: Boolean,
     updateChannel: String,
+    dashboardWidgets: List<WidgetType>,
+    coreTrafficMetricsUi: Boolean,
+    pingMetricsUi: Boolean,
+    speedMetricMode: SpeedMetricMode,
+    graphSpeedMetricMode: SpeedMetricMode,
     diagnostics: AppDiagnosticsSnapshot
 ): String = buildString {
     appendLine("NxiwNetwork Debug")
@@ -718,6 +805,11 @@ private fun buildDebugSnapshot(
     appendLine("Auto-connect on boot: $autoConnectOnBoot")
     appendLine("Dynamic color: $useDynamicColor")
     appendLine("Update channel: $updateChannel")
+    appendLine("Dashboard widgets: ${dashboardWidgets.joinToString(",") { it.name }}")
+    appendLine("Core traffic metrics UI: $coreTrafficMetricsUi")
+    appendLine("Ping metrics UI: $pingMetricsUi")
+    appendLine("Speed metric mode: ${speedMetricMode.id}")
+    appendLine("Graph speed metric mode: ${graphSpeedMetricMode.id}")
     appendLine("Diagnostics enabled: ${diagnostics.enabled}")
     appendLine("Diagnostics uptime: ${formatDiagnosticsUptime(diagnostics)}")
     appendLine("Diagnostics app memory: ${formatAppMemory(diagnostics)}")

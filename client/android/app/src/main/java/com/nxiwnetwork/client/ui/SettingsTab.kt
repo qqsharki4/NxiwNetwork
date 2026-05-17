@@ -114,6 +114,37 @@ enum class WidgetType(val title: String, val icon: ImageVector, val isWide: Bool
     GRAPH("График сети", Icons.Default.QueryStats, isWide = true)
 }
 
+enum class SpeedMetricMode(val id: String, val label: String, val chipLabel: String) {
+    TOTAL("total", "Отдача + скачка", "↑+↓"),
+    UP("up", "Отдача", "↑"),
+    DOWN("down", "Скачка", "↓")
+}
+
+fun parseSpeedMetricMode(raw: String): SpeedMetricMode {
+    return SpeedMetricMode.entries.find { it.id == raw.lowercase() } ?: SpeedMetricMode.TOTAL
+}
+
+fun speedMetricValue(mode: SpeedMetricMode, uploadBytes: Long, downloadBytes: Long): Long {
+    return when (mode) {
+        SpeedMetricMode.TOTAL -> uploadBytes + downloadBytes
+        SpeedMetricMode.UP -> uploadBytes
+        SpeedMetricMode.DOWN -> downloadBytes
+    }
+}
+
+fun parseDashboardWidgets(raw: String): List<WidgetType> {
+    if (raw.isBlank()) return emptyList()
+    val parsed = raw.split(",")
+        .mapNotNull { name -> WidgetType.entries.find { it.name == name.trim() } }
+        .distinct()
+    return parsed.ifEmpty {
+        SettingsStore.DEFAULT_DASHBOARD_WIDGETS.split(",")
+            .mapNotNull { name -> WidgetType.entries.find { it.name == name } }
+    }
+}
+
+fun encodeDashboardWidgets(widgets: List<WidgetType>): String = widgets.distinct().joinToString(",") { it.name }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsTab() {
@@ -121,7 +152,6 @@ fun SettingsTab() {
     val haptic = LocalHapticFeedback.current
     val scope = rememberCoroutineScope()
     val settingsStore = remember { SettingsStore(context) }
-    val prefs = context.getSharedPreferences("nxiwnetwork_widgets", Context.MODE_PRIVATE)
     var pendingVpnStartIntent by remember { mutableStateOf<Intent?>(null) }
     val vpnPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val startIntent = pendingVpnStartIntent
@@ -134,7 +164,11 @@ fun SettingsTab() {
     val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
     val cooldownSeconds by TunnelManager.cooldownSeconds.collectAsStateWithLifecycle()
     val currentPing by TunnelManager.currentPingMs.collectAsStateWithLifecycle()
-    val currentSpeed by TunnelManager.currentSpeedBytes.collectAsStateWithLifecycle()
+    val currentUploadSpeed by TunnelManager.currentUploadSpeedBytes.collectAsStateWithLifecycle()
+    val currentDownloadSpeed by TunnelManager.currentDownloadSpeedBytes.collectAsStateWithLifecycle()
+    val trafficGraphPoints by TunnelManager.trafficGraphPoints.collectAsStateWithLifecycle()
+    val uploadTrafficGraphPoints by TunnelManager.uploadTrafficGraphPoints.collectAsStateWithLifecycle()
+    val downloadTrafficGraphPoints by TunnelManager.downloadTrafficGraphPoints.collectAsStateWithLifecycle()
     val activeWorkers by TunnelManager.activeWorkers.collectAsStateWithLifecycle()
 
     val peer by settingsStore.peer.collectAsStateWithLifecycle("")
@@ -148,26 +182,27 @@ fun SettingsTab() {
     val protocol by settingsStore.protocol.collectAsStateWithLifecycle("udp")
     val captchaMethod by settingsStore.captchaSolveMethod.collectAsStateWithLifecycle("manual")
     val savedServersJson by settingsStore.savedServersJson.collectAsStateWithLifecycle("[]")
+    val dashboardWidgetsRaw by settingsStore.dashboardWidgets.collectAsStateWithLifecycle(SettingsStore.DEFAULT_DASHBOARD_WIDGETS)
+    val speedMetricModeRaw by settingsStore.speedMetricMode.collectAsStateWithLifecycle(SettingsStore.DEFAULT_SPEED_METRIC_MODE)
+    val graphSpeedMetricModeRaw by settingsStore.graphSpeedMetricMode.collectAsStateWithLifecycle(SettingsStore.DEFAULT_SPEED_METRIC_MODE)
+    val speedMetricMode = parseSpeedMetricMode(speedMetricModeRaw)
+    val graphSpeedMetricMode = parseSpeedMetricMode(graphSpeedMetricModeRaw)
+    val displayedSpeed = speedMetricValue(speedMetricMode, currentUploadSpeed, currentDownloadSpeed)
+    val displayedGraphSpeed = speedMetricValue(graphSpeedMetricMode, currentUploadSpeed, currentDownloadSpeed)
+    val displayedGraphPoints = when (graphSpeedMetricMode) {
+        SpeedMetricMode.TOTAL -> trafficGraphPoints
+        SpeedMetricMode.UP -> uploadTrafficGraphPoints
+        SpeedMetricMode.DOWN -> downloadTrafficGraphPoints
+    }
 
     val serverList = remember { mutableStateListOf<NxiwNetworkServer>() }
     var activeWidgetList by remember { mutableStateOf(listOf<WidgetType>()) }
     var availableWidgetList by remember { mutableStateOf(listOf<WidgetType>()) }
 
-    LaunchedEffect(Unit) {
-        val savedOrder = prefs.getString("order", null)
-        if (savedOrder != null) {
-            try {
-                val active = savedOrder.split(",").mapNotNull { name -> WidgetType.entries.find { it.name == name } }
-                activeWidgetList = active
-                availableWidgetList = WidgetType.entries - active.toSet()
-            } catch (e: Exception) {
-                activeWidgetList = WidgetType.entries
-                availableWidgetList = emptyList()
-            }
-        } else {
-            activeWidgetList = WidgetType.entries
-            availableWidgetList = emptyList()
-        }
+    LaunchedEffect(dashboardWidgetsRaw) {
+        val active = parseDashboardWidgets(dashboardWidgetsRaw)
+        activeWidgetList = active
+        availableWidgetList = WidgetType.entries - active.toSet()
     }
 
     LaunchedEffect(savedServersJson) {
@@ -199,7 +234,7 @@ fun SettingsTab() {
     fun updateWidgetOrder(newList: List<WidgetType>) {
         activeWidgetList = newList
         availableWidgetList = WidgetType.entries - newList.toSet()
-        prefs.edit().putString("order", newList.joinToString(",") { it.name }).apply()
+        scope.launch { settingsStore.saveDashboardWidgets(encodeDashboardWidgets(newList)) }
     }
 
     fun startTunnelWithPermission(intent: Intent) {
@@ -396,15 +431,22 @@ fun SettingsTab() {
                         }
                 ) {
                     if (widget == WidgetType.GRAPH) {
-                        SpeedGraphCard(isRunning = tunnelRunning, currentSpeedBytes = currentSpeed, modifier = Modifier.height(160.dp))
+                        SpeedGraphCard(
+                            isRunning = tunnelRunning,
+                            currentSpeedBytes = displayedGraphSpeed,
+                            uploadSpeedBytes = currentUploadSpeed,
+                            downloadSpeedBytes = currentDownloadSpeed,
+                            points = displayedGraphPoints,
+                            modifier = Modifier.height(160.dp)
+                        )
                     } else {
                         DashboardCard(title = widget.title, icon = widget.icon, modifier = Modifier.height(130.dp)) {
                             val value = when (widget) {
                                 WidgetType.PING -> if (tunnelRunning && currentPing > 0) "${currentPing} ms" else "--"
-                                WidgetType.SESSION -> if (tunnelRunning) timerString else "00:00"
+                                WidgetType.SESSION -> if (tunnelRunning) timerString else "00:00:00"
                                 WidgetType.WORKERS -> "$activeWorkers"
                                 WidgetType.SPEED -> {
-                                    val speedKb = currentSpeed / 1024f
+                                    val speedKb = displayedSpeed / 1024f
                                     if (tunnelRunning) if (speedKb > 1024) String.format("%.1f MB/s", speedKb / 1024f) else String.format("%.0f KB/s", speedKb) else "0 KB/s"
                                 }
                                 else -> ""
@@ -619,10 +661,17 @@ private fun checkInternetAccess(context: Context, preferTunnel: Boolean): Boolea
 }
 
 @Composable
-fun SpeedGraphCard(isRunning: Boolean, currentSpeedBytes: Long, modifier: Modifier = Modifier) {
-    val points = remember { mutableStateListOf<Float>().apply { repeat(30) { add(0f) } } }
-    LaunchedEffect(currentSpeedBytes, isRunning) { points.removeAt(0); points.add(if (isRunning) currentSpeedBytes.toFloat() else 0f) }
-    val maxPoint by remember(points) { derivedStateOf { (points.maxOrNull() ?: 1f).coerceAtLeast(1024 * 50f) } }
+fun SpeedGraphCard(
+    isRunning: Boolean,
+    currentSpeedBytes: Long,
+    uploadSpeedBytes: Long,
+    downloadSpeedBytes: Long,
+    points: List<Float>,
+    modifier: Modifier = Modifier
+) {
+    val safePoints = if (points.size >= 2) points else List(30) { 0f }
+    val maxPoint = (safePoints.maxOrNull() ?: 1f).coerceAtLeast(1024 * 50f)
+    val trafficLabel = "↑ ${formatGraphSpeed(if (isRunning) uploadSpeedBytes else 0L)}   ↓ ${formatGraphSpeed(if (isRunning) downloadSpeedBytes else 0L)}"
 
     Surface(modifier = modifier.fillMaxWidth(), shape = RoundedCornerShape(28.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
         Column(modifier = Modifier.padding(20.dp)) {
@@ -632,19 +681,35 @@ fun SpeedGraphCard(isRunning: Boolean, currentSpeedBytes: Long, modifier: Modifi
                 Text("Трафик сети", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.weight(1f))
                 val dotColor by animateColorAsState(if (isRunning && currentSpeedBytes > 1024) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline, label = "")
+                Box(modifier = Modifier.widthIn(min = 132.dp), contentAlignment = Alignment.CenterEnd) {
+                    AnimatedContent(
+                        targetState = trafficLabel,
+                        transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(180)) },
+                        label = "trafficSpeedLabel"
+                    ) { label ->
+                        Text(
+                            label,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Clip
+                        )
+                    }
+                }
+                Spacer(Modifier.width(8.dp))
                 Box(modifier = Modifier.size(10.dp).background(dotColor, CircleShape))
             }
             Spacer(Modifier.height(16.dp))
             val lineColor = MaterialTheme.colorScheme.primary
             Canvas(modifier = Modifier.fillMaxSize()) {
                 val path = Path()
-                val stepX = size.width / (points.size - 1)
-                points.forEachIndexed { i, v ->
+                val stepX = size.width / (safePoints.size - 1)
+                safePoints.forEachIndexed { i, v ->
                     val x = i * stepX
                     val y = size.height - (v / maxPoint * size.height)
                     if (i == 0) path.moveTo(x, y) else {
                         val px = (i - 1) * stepX
-                        val py = size.height - (points[i - 1] / maxPoint * size.height)
+                        val py = size.height - (safePoints[i - 1] / maxPoint * size.height)
                         path.cubicTo(px + stepX / 2f, py, px + stepX / 2f, y, x, y)
                     }
                 }
@@ -653,6 +718,16 @@ fun SpeedGraphCard(isRunning: Boolean, currentSpeedBytes: Long, modifier: Modifi
                 drawPath(path = fillPath, brush = Brush.verticalGradient(listOf(lineColor.copy(alpha = 0.4f), Color.Transparent), 0f, size.height))
             }
         }
+    }
+}
+
+private fun formatGraphSpeed(bytesPerSecond: Long): String {
+    if (bytesPerSecond <= 0L) return "0 KB/s"
+    val kb = bytesPerSecond / 1024f
+    return if (kb >= 1024f) {
+        String.format("%.1f MB/s", kb / 1024f)
+    } else {
+        String.format("%.0f KB/s", kb)
     }
 }
 

@@ -7,8 +7,8 @@ val releaseKeystoreProperties = Properties().apply {
         releaseKeystorePropertiesFile.inputStream().use(::load)
     }
 }
-val appVersionCode = 4
-val appVersionName = "1.1.0-dev.4"
+val appVersionCode = 5
+val appVersionName = "1.1.0-dev.5"
 
 fun releaseSigningValue(envName: String, propertyName: String): String? {
     return System.getenv(envName) ?: releaseKeystoreProperties.getProperty(propertyName)

@@ -4,7 +4,6 @@ import android.appwidget.AppWidgetManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.net.TrafficStats
 import android.os.SystemClock
 import androidx.compose.runtime.Stable
 import kotlinx.coroutines.CoroutineScope
@@ -29,6 +28,23 @@ data class LogEntry(
     val priority: Int = 99, 
     val isError: Boolean = false
 )
+
+@Stable
+data class CoreTrafficMetrics(
+    val activeConnections: Int = 0,
+    val totalUpBytes: Long = 0L,
+    val totalDownBytes: Long = 0L,
+    val upBytesPerSecond: Long = 0L,
+    val downBytesPerSecond: Long = 0L,
+    val packetsUp: Long = 0L,
+    val packetsDown: Long = 0L,
+    val upPacketsPerSecond: Long = 0L,
+    val downPacketsPerSecond: Long = 0L,
+    val droppedPackets: Long = 0L
+) {
+    val totalBytes: Long get() = totalUpBytes + totalDownBytes
+    val speedBytesPerSecond: Long get() = upBytesPerSecond + downBytesPerSecond
+}
 
 object TunnelManager {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -67,6 +83,14 @@ object TunnelManager {
 
     val currentPingMs = MutableStateFlow(0)
     val currentSpeedBytes = MutableStateFlow(0L)
+    val currentUploadSpeedBytes = MutableStateFlow(0L)
+    val currentDownloadSpeedBytes = MutableStateFlow(0L)
+    val coreTrafficMetrics = MutableStateFlow(CoreTrafficMetrics())
+    val trafficGraphPoints = MutableStateFlow(List(30) { 0f })
+    val uploadTrafficGraphPoints = MutableStateFlow(List(30) { 0f })
+    val downloadTrafficGraphPoints = MutableStateFlow(List(30) { 0f })
+    val coreTrafficMetricsUiEnabled = MutableStateFlow(true)
+    val pingMetricsEnabled = MutableStateFlow(true)
 
     private fun updateWidgetState() {
         val ctx = lastContext ?: return
@@ -121,16 +145,10 @@ object TunnelManager {
     private fun startMetricsMonitor(ip: String) {
         metricsJob?.cancel()
         metricsJob = scope.launch(Dispatchers.IO) {
-            var lastRxBytes = TrafficStats.getTotalRxBytes()
             var loopCount = 0
             
             while (isActive && running.value) {
-                val currentRxBytes = TrafficStats.getTotalRxBytes()
-                val delta = currentRxBytes - lastRxBytes
-                currentSpeedBytes.value = if (delta > 0) delta else 0L
-                lastRxBytes = currentRxBytes
-
-                if (loopCount % 5 == 0) {
+                if (loopCount % 5 == 0 && pingMetricsEnabled.value) {
                     scope.launch(Dispatchers.IO) {
                         try {
                             val process = Runtime.getRuntime().exec("ping -c 1 -W 1 $ip")
@@ -148,12 +166,84 @@ object TunnelManager {
                             currentPingMs.value = 0
                         }
                     }
+                } else if (!pingMetricsEnabled.value) {
+                    currentPingMs.value = 0
                 }
                 
                 delay(1000)
                 loopCount++
             }
         }
+    }
+
+    private fun applyCoreMetrics(metrics: CoreTrafficMetrics) {
+        coreTrafficMetrics.value = metrics
+        activeWorkers.value = metrics.activeConnections
+        currentUploadSpeedBytes.value = metrics.upBytesPerSecond
+        currentDownloadSpeedBytes.value = metrics.downBytesPerSecond
+        currentSpeedBytes.value = metrics.speedBytesPerSecond
+        appendTrafficGraphPoint(trafficGraphPoints, metrics.speedBytesPerSecond)
+        appendTrafficGraphPoint(uploadTrafficGraphPoints, metrics.upBytesPerSecond)
+        appendTrafficGraphPoint(downloadTrafficGraphPoints, metrics.downBytesPerSecond)
+    }
+
+    fun setCoreTrafficMetricsUiEnabled(enabled: Boolean) {
+        coreTrafficMetricsUiEnabled.value = enabled
+        if (!enabled) {
+            currentUploadSpeedBytes.value = 0L
+            currentDownloadSpeedBytes.value = 0L
+            currentSpeedBytes.value = 0L
+            trafficGraphPoints.value = List(30) { 0f }
+            uploadTrafficGraphPoints.value = List(30) { 0f }
+            downloadTrafficGraphPoints.value = List(30) { 0f }
+        }
+    }
+
+    fun setPingMetricsEnabled(enabled: Boolean) {
+        pingMetricsEnabled.value = enabled
+        if (!enabled) currentPingMs.value = 0
+    }
+
+    private fun resetCoreMetrics() {
+        coreTrafficMetrics.value = CoreTrafficMetrics()
+        currentUploadSpeedBytes.value = 0L
+        currentDownloadSpeedBytes.value = 0L
+        currentSpeedBytes.value = 0L
+        trafficGraphPoints.value = List(30) { 0f }
+        uploadTrafficGraphPoints.value = List(30) { 0f }
+        downloadTrafficGraphPoints.value = List(30) { 0f }
+    }
+
+    private fun appendTrafficGraphPoint(target: MutableStateFlow<List<Float>>, bytesPerSecond: Long) {
+        target.update { points ->
+            (points.drop(1) + bytesPerSecond.coerceAtLeast(0L).toFloat()).takeLast(30)
+        }
+    }
+
+    private fun parseCoreMetrics(message: String): CoreTrafficMetrics? {
+        val values = Regex("""([a-z_]+)=(-?\d+)""")
+            .findAll(message)
+            .mapNotNull { match ->
+                val key = match.groupValues[1]
+                val value = match.groupValues[2].toLongOrNull() ?: return@mapNotNull null
+                key to value
+            }
+            .toMap()
+
+        if (values.isEmpty()) return null
+
+        return CoreTrafficMetrics(
+            activeConnections = values["active"]?.toInt() ?: 0,
+            totalUpBytes = values["total_up"] ?: 0L,
+            totalDownBytes = values["total_down"] ?: 0L,
+            upBytesPerSecond = values["up_bps"] ?: 0L,
+            downBytesPerSecond = values["down_bps"] ?: 0L,
+            packetsUp = values["packets_up"] ?: 0L,
+            packetsDown = values["packets_down"] ?: 0L,
+            upPacketsPerSecond = values["up_pps"] ?: 0L,
+            downPacketsPerSecond = values["down_pps"] ?: 0L,
+            droppedPackets = values["drops"] ?: 0L
+        )
     }
 
     fun start(context: Context, params: TunnelParams, isSwitching: Boolean = false) {
@@ -172,7 +262,7 @@ object TunnelManager {
             currentParams = params
             forceRegenerateUA = false
             currentCaptchaMode = params.captchaMode
-            currentSpeedBytes.value = 0L
+            resetCoreMetrics()
             currentPingMs.value = 0
             tunnelStartedAtElapsedMs.value = SystemClock.elapsedRealtime()
         }
@@ -204,6 +294,8 @@ object TunnelManager {
 
                 val settingsStore = SettingsStore(appContext)
                 val requestedBackend = CoreBackend.fromId(settingsStore.coreBackend.first())
+                setCoreTrafficMetricsUiEnabled(settingsStore.coreTrafficMetricsUi.first())
+                setPingMetricsEnabled(settingsStore.pingMetricsUi.first())
                 val backendResolution = resolveCoreBackend(context.applicationInfo.nativeLibraryDir, requestedBackend)
                 val binaryFile = backendResolution.binaryFile
                 
@@ -376,6 +468,21 @@ object TunnelManager {
                         }
                     }
 
+                    if (lineTrim.contains("[CORE_METRICS]")) {
+                        val msg = lineTrim.substringAfter("[CORE_METRICS]").trim()
+                        if (coreTrafficMetricsUiEnabled.value) {
+                            parseCoreMetrics(msg)?.let { applyCoreMetrics(it) }
+                        } else {
+                            currentUploadSpeedBytes.value = 0L
+                            currentDownloadSpeedBytes.value = 0L
+                            currentSpeedBytes.value = 0L
+                            trafficGraphPoints.value = List(30) { 0f }
+                            uploadTrafficGraphPoints.value = List(30) { 0f }
+                            downloadTrafficGraphPoints.value = List(30) { 0f }
+                        }
+                        return@forEachLine
+                    }
+
                     if (lineTrim.contains("[СТАТИСТИКА]")) {
                         val msg = lineTrim.substringAfter("[СТАТИСТИКА]").trim()
                         stats.value = msg
@@ -544,7 +651,7 @@ object TunnelManager {
                 val proc = process
                 if (proc == null || !proc.isAlive) {
                     updateLog("watchdog", "⚠ Процесс упал. Перезапуск...", 50, true)
-                    activeWorkers.value = 0
+                    resetCoreMetrics()
                     forceRegenerateUA = true
                     killProcess(keepRunning = true)
                     delay(2000)
@@ -597,7 +704,7 @@ object TunnelManager {
     fun pause() {
         if (!running.value) return
         killProcess(keepRunning = true)
-        activeWorkers.value = 0
+        resetCoreMetrics()
     }
 
     fun resume() {
@@ -618,7 +725,7 @@ object TunnelManager {
         watchdogJob?.cancel()
         readerJob?.cancel()
         metricsJob?.cancel()
-        currentSpeedBytes.value = 0L
+        resetCoreMetrics()
         currentPingMs.value = 0
         val proc = process
         process = null
@@ -651,7 +758,7 @@ object TunnelManager {
             wgHelper?.stopTunnel()
         }
         killProcess(expectedStop = userRequested)
-        activeWorkers.value = 0
+        resetCoreMetrics()
         currentParams = null
         tunnelStartedAtElapsedMs.value = null
         ManlCaptchaWebViewManager.cancelCaptcha()
@@ -663,7 +770,7 @@ object TunnelManager {
         }
         withContext(Dispatchers.IO) {
             killProcess()
-            activeWorkers.value = 0
+            resetCoreMetrics()
             currentParams = null
             tunnelStartedAtElapsedMs.value = null
             ManlCaptchaWebViewManager.cancelCaptcha()
@@ -729,7 +836,7 @@ object TunnelManager {
 
     fun clearLogs() {
         logs.value = emptyList()
-        activeWorkers.value = 0
+        resetCoreMetrics()
     }
 
     private fun Throwable.readableMessage(): String {

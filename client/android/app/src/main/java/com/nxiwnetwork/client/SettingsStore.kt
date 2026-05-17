@@ -60,7 +60,15 @@ class SettingsStore(context: Context) {
         private val DIAGNOSTICS_PROCESS_METRICS = booleanPreferencesKey("diagnostics_process_metrics")
         private val DIAGNOSTICS_TRAFFIC_METRICS = booleanPreferencesKey("diagnostics_traffic_metrics")
         private val DIAGNOSTICS_BATTERY_METRICS = booleanPreferencesKey("diagnostics_battery_metrics")
-
+        private val DASHBOARD_WIDGETS = stringPreferencesKey("dashboard_widgets")
+        private val CORE_TRAFFIC_METRICS_UI = booleanPreferencesKey("core_traffic_metrics_ui")
+        private val PING_METRICS_UI = booleanPreferencesKey("ping_metrics_ui")
+        private val SPEED_METRIC_MODE = stringPreferencesKey("speed_metric_mode")
+        private val GRAPH_SPEED_METRIC_MODE = stringPreferencesKey("graph_speed_metric_mode")
+        const val DEFAULT_DASHBOARD_WIDGETS = "PING,SESSION,WORKERS,SPEED,GRAPH"
+        const val DEFAULT_SPEED_METRIC_MODE = "total"
+        private val SPEED_METRIC_MODES = setOf("total", "up", "down")
+	
         // НОВЫЙ КЛЮЧ ДЛЯ MTU
         private val CUSTOM_MTU = intPreferencesKey("custom_mtu")
 		private val CUSTOM_DNS_IP = stringPreferencesKey("custom_dns_ip")
@@ -106,7 +114,12 @@ class SettingsStore(context: Context) {
     val diagnosticsProcessMetrics: Flow<Boolean> = dataStore.data.map { it[DIAGNOSTICS_PROCESS_METRICS] ?: true }
     val diagnosticsTrafficMetrics: Flow<Boolean> = dataStore.data.map { it[DIAGNOSTICS_TRAFFIC_METRICS] ?: true }
     val diagnosticsBatteryMetrics: Flow<Boolean> = dataStore.data.map { it[DIAGNOSTICS_BATTERY_METRICS] ?: true }
-
+    val dashboardWidgets: Flow<String> = dataStore.data.map { it[DASHBOARD_WIDGETS] ?: DEFAULT_DASHBOARD_WIDGETS }
+    val coreTrafficMetricsUi: Flow<Boolean> = dataStore.data.map { it[CORE_TRAFFIC_METRICS_UI] ?: true }
+    val pingMetricsUi: Flow<Boolean> = dataStore.data.map { it[PING_METRICS_UI] ?: true }
+    val speedMetricMode: Flow<String> = dataStore.data.map { normalizeSpeedMetricMode(it[SPEED_METRIC_MODE]) }
+    val graphSpeedMetricMode: Flow<String> = dataStore.data.map { normalizeSpeedMetricMode(it[GRAPH_SPEED_METRIC_MODE]) }
+	
     // НОВЫЙ FLOW ДЛЯ MTU (0 = Авто)
     val customMtu: Flow<Int> = dataStore.data.map { it[CUSTOM_MTU] ?: 0 }
   
@@ -167,6 +180,11 @@ class SettingsStore(context: Context) {
     suspend fun saveDiagnosticsProcessMetrics(enabled: Boolean) { dataStore.edit { prefs -> prefs[DIAGNOSTICS_PROCESS_METRICS] = enabled } }
     suspend fun saveDiagnosticsTrafficMetrics(enabled: Boolean) { dataStore.edit { prefs -> prefs[DIAGNOSTICS_TRAFFIC_METRICS] = enabled } }
     suspend fun saveDiagnosticsBatteryMetrics(enabled: Boolean) { dataStore.edit { prefs -> prefs[DIAGNOSTICS_BATTERY_METRICS] = enabled } }
+    suspend fun saveDashboardWidgets(widgets: String) { dataStore.edit { prefs -> prefs[DASHBOARD_WIDGETS] = widgets } }
+    suspend fun saveCoreTrafficMetricsUi(enabled: Boolean) { dataStore.edit { prefs -> prefs[CORE_TRAFFIC_METRICS_UI] = enabled } }
+    suspend fun savePingMetricsUi(enabled: Boolean) { dataStore.edit { prefs -> prefs[PING_METRICS_UI] = enabled } }
+    suspend fun saveSpeedMetricMode(mode: String) { dataStore.edit { prefs -> prefs[SPEED_METRIC_MODE] = normalizeSpeedMetricMode(mode) } }
+    suspend fun saveGraphSpeedMetricMode(mode: String) { dataStore.edit { prefs -> prefs[GRAPH_SPEED_METRIC_MODE] = normalizeSpeedMetricMode(mode) } }
     suspend fun getCachedAvailableUpdates(): List<AvailableUpdate> {
         return ReleaseUpdater.decodeAvailableUpdates(dataStore.data.first()[UPDATE_AVAILABLE_CACHE].orEmpty())
     }
@@ -197,5 +215,10 @@ class SettingsStore(context: Context) {
             "pre", "dev" -> channel.lowercase()
             else -> "stable"
         }
+    }
+
+    private fun normalizeSpeedMetricMode(mode: String?): String {
+        val normalized = mode?.lowercase().orEmpty()
+        return if (normalized in SPEED_METRIC_MODES) normalized else DEFAULT_SPEED_METRIC_MODE
     }
 }
