@@ -273,6 +273,7 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
 
                     DebugSectionTitle("Devtools")
                     DebugWavyProgressPreview()
+                    DebugMaterial3ExpressivePreview()
                     DebugToolButton(Icons.Default.ContentCopy, "Копировать debug snapshot", "Копирует состояние приложения без хешей и паролей.") {
                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                         copyDebugText("NxiwNetwork Debug", snapshot, "Снимок отладки скопирован")
@@ -354,6 +355,195 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
                 Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(20.dp)) {
                     Text("Закрыть", fontWeight = FontWeight.Bold)
                 }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun DebugMaterial3ExpressivePreview() {
+    var tonalChecked by remember { mutableStateOf(true) }
+    var outlinedChecked by remember { mutableStateOf(false) }
+    var chipGo by remember { mutableStateOf(true) }
+    var chipRust by remember { mutableStateOf(false) }
+    var chipUdp by remember { mutableStateOf(true) }
+    var menuExpanded by remember { mutableStateOf(false) }
+    var fabExpanded by remember { mutableStateOf(false) }
+    val colorScheme = MaterialTheme.colorScheme
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(colorScheme.surfaceVariant.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text(
+            "Material3 expressive preview",
+            style = MaterialTheme.typography.bodyMedium,
+            color = colorScheme.onSurface,
+            fontWeight = FontWeight.Bold
+        )
+
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Button(
+                onClick = {},
+                shapes = ButtonDefaults.shapes(),
+                contentPadding = ButtonDefaults.contentPaddingFor(ButtonDefaults.MediumContainerHeight)
+            ) {
+                Icon(Icons.Default.PlayArrow, null, modifier = Modifier.size(ButtonDefaults.MediumIconSize))
+                Spacer(Modifier.width(ButtonDefaults.MediumIconSpacing))
+                Text("Primary")
+            }
+            ElevatedButton(onClick = {}, shapes = ButtonDefaults.shapes()) {
+                Icon(Icons.Default.AutoAwesome, null, modifier = Modifier.size(ButtonDefaults.IconSize))
+                Spacer(Modifier.width(ButtonDefaults.IconSpacing))
+                Text("Elevated")
+            }
+            FilledTonalButton(onClick = {}, shapes = ButtonDefaults.shapes()) {
+                Text("Tonal")
+            }
+        }
+
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            TonalToggleButton(
+                checked = tonalChecked,
+                onCheckedChange = { tonalChecked = it },
+                shapes = ToggleButtonDefaults.shapes()
+            ) {
+                Icon(Icons.Default.Tune, null, modifier = Modifier.size(ToggleButtonDefaults.IconSize))
+                Spacer(Modifier.width(ToggleButtonDefaults.IconSpacing))
+                Text("Tonal toggle")
+            }
+            OutlinedToggleButton(
+                checked = outlinedChecked,
+                onCheckedChange = { outlinedChecked = it },
+                shapes = ToggleButtonDefaults.shapes()
+            ) {
+                Icon(Icons.Default.Route, null, modifier = Modifier.size(ToggleButtonDefaults.IconSize))
+                Spacer(Modifier.width(ToggleButtonDefaults.IconSpacing))
+                Text("Outlined")
+            }
+        }
+
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            ElevatedFilterChip(
+                selected = chipGo,
+                onClick = { chipGo = !chipGo },
+                label = { Text("Go") },
+                leadingIcon = { Icon(Icons.Default.Memory, null, modifier = Modifier.size(FilterChipDefaults.IconSize)) },
+                shapes = FilterChipDefaults.shapes()
+            )
+            ElevatedFilterChip(
+                selected = chipRust,
+                onClick = { chipRust = !chipRust },
+                label = { Text("Rust") },
+                leadingIcon = { Icon(Icons.Default.Bolt, null, modifier = Modifier.size(FilterChipDefaults.IconSize)) },
+                shapes = FilterChipDefaults.shapes()
+            )
+            FilterChip(
+                selected = chipUdp,
+                onClick = { chipUdp = !chipUdp },
+                label = { Text("UDP") },
+                trailingIcon = { Icon(Icons.Default.SyncAlt, null, modifier = Modifier.size(FilterChipDefaults.IconSize)) },
+                shapes = FilterChipDefaults.shapes()
+            )
+        }
+
+        Box {
+            OutlinedButton(onClick = { menuExpanded = true }, shape = RoundedCornerShape(18.dp)) {
+                Icon(Icons.Default.MoreVert, null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Expressive menu")
+            }
+            DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                DropdownMenuItem(
+                    text = { Text("Preview action") },
+                    onClick = { menuExpanded = false },
+                    leadingIcon = { Icon(Icons.Default.Visibility, null) }
+                )
+                DropdownMenuItem(
+                    text = { Text("Toggle style") },
+                    onClick = { menuExpanded = false },
+                    leadingIcon = { Icon(Icons.Default.Animation, null) },
+                    trailingIcon = { Icon(Icons.Default.Check, null) }
+                )
+                DropdownMenuItem(
+                    text = { Text("No-op item") },
+                    onClick = { menuExpanded = false },
+                    leadingIcon = { Icon(Icons.Default.Code, null) }
+                )
+            }
+        }
+
+        CompositionLocalProvider(
+            LocalRippleConfiguration provides RippleConfiguration(
+                focus = RippleConfiguration.Focus.InsetRing(
+                    outerStrokeColor = colorScheme.primary,
+                    innerStrokeColor = colorScheme.surface
+                )
+            )
+        ) {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(onClick = {}, shape = RoundedCornerShape(18.dp)) {
+                    Icon(Icons.Default.CenterFocusStrong, null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Inset focus")
+                }
+                TextButton(onClick = {}, shape = RoundedCornerShape(18.dp)) {
+                    Text("Focus ripple")
+                }
+            }
+        }
+
+        Box(modifier = Modifier.fillMaxWidth().height(176.dp)) {
+            FloatingActionButtonMenu(
+                expanded = fabExpanded,
+                modifier = Modifier.align(Alignment.BottomEnd),
+                button = {
+                    ToggleFloatingActionButton(
+                        checked = fabExpanded,
+                        onCheckedChange = { fabExpanded = it }
+                    ) {
+                        Icon(
+                            imageVector = if (checkedProgress > 0.5f) Icons.Default.Close else Icons.Default.Add,
+                            contentDescription = null
+                        )
+                    }
+                }
+            ) {
+                FloatingActionButtonMenuItem(
+                    onClick = { fabExpanded = false },
+                    icon = { Icon(Icons.Default.ContentCopy, null) },
+                    text = { Text("Copy") }
+                )
+                FloatingActionButtonMenuItem(
+                    onClick = { fabExpanded = false },
+                    icon = { Icon(Icons.Default.Refresh, null) },
+                    text = { Text("Reload") }
+                )
+                FloatingActionButtonMenuItem(
+                    onClick = { fabExpanded = false },
+                    icon = { Icon(Icons.Default.BugReport, null) },
+                    text = { Text("Debug") }
+                )
             }
         }
     }

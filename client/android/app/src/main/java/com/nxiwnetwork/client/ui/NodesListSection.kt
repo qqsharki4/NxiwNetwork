@@ -1,5 +1,10 @@
 package com.nxiwnetwork.client.ui
 
+import android.content.ClipboardManager
+import android.content.Context
+import android.net.Uri
+import android.util.Base64
+import android.widget.Toast
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
@@ -23,12 +28,17 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Dns
-import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.FloatingActionButtonMenu
+import androidx.compose.material3.FloatingActionButtonMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.ToggleFloatingActionButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -46,6 +56,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.nxiwnetwork.client.formatNodeAddress
+import com.nxiwnetwork.client.parseNodeAddress
 import com.nxiwnetwork.client.SettingsStore
 import com.nxiwnetwork.client.normalizeNodeEndpoint
 import kotlinx.coroutines.launch
@@ -53,6 +65,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
 
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun NodesListSection(modifier: Modifier = Modifier) {
     val context = LocalContext.current
@@ -71,6 +84,7 @@ fun NodesListSection(modifier: Modifier = Modifier) {
 
     val serverList = remember { mutableStateListOf<NxiwNetworkServer>() }
     var serverToEdit by remember { mutableStateOf<NxiwNetworkServer?>(null) }
+    var nodeFabExpanded by remember { mutableStateOf(false) }
 
     fun saveServers() {
         val array = JSONArray()
@@ -85,6 +99,42 @@ fun NodesListSection(modifier: Modifier = Modifier) {
             )
         }
         scope.launch { settingsStore.saveServersList(array.toString()) }
+    }
+
+    fun openNewNodeDialog() {
+        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+        nodeFabExpanded = false
+        serverToEdit = NxiwNetworkServer(name = "", ip = "", password = "")
+    }
+
+    fun importNodeFromClipboard() {
+        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+        nodeFabExpanded = false
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val text = clipboard.primaryClip?.takeIf { it.itemCount > 0 }
+            ?.getItemAt(0)
+            ?.coerceToText(context)
+            ?.toString()
+            ?.trim()
+            .orEmpty()
+        val imported = parseNodeClipboardText(text)
+        if (imported == null) {
+            Toast.makeText(context, "В буфере нет конфига ноды", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val existingIndex = serverList.indexOfFirst { normalizeNodeEndpoint(it.ip) == normalizeNodeEndpoint(imported.ip) }
+        if (existingIndex == -1) {
+            serverList.add(imported)
+        } else {
+            serverList[existingIndex] = imported.copy(id = serverList[existingIndex].id)
+        }
+        saveServers()
+        Toast.makeText(
+            context,
+            if (existingIndex == -1) "Нода добавлена из буфера" else "Нода обновлена из буфера",
+            Toast.LENGTH_SHORT
+        ).show()
     }
 
     LaunchedEffect(savedServersJson) {
@@ -168,16 +218,41 @@ fun NodesListSection(modifier: Modifier = Modifier) {
             }
         }
 
-        FloatingActionButton(
-            onClick = {
-                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                serverToEdit = NxiwNetworkServer(name = "", ip = "", password = "")
-            },
+        Box(
             modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(24.dp)
+                .fillMaxSize()
+                .padding(end = 8.dp, bottom = 8.dp),
+            contentAlignment = Alignment.BottomEnd
         ) {
-            Icon(Icons.Default.Add, contentDescription = "Добавить ноду")
+            FloatingActionButtonMenu(
+                expanded = nodeFabExpanded,
+                horizontalAlignment = Alignment.End,
+                button = {
+                    ToggleFloatingActionButton(
+                        checked = nodeFabExpanded,
+                        onCheckedChange = {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            nodeFabExpanded = it
+                        }
+                    ) {
+                        Icon(
+                            imageVector = if (checkedProgress > 0.5f) Icons.Default.Close else Icons.Default.Add,
+                            contentDescription = if (nodeFabExpanded) "Закрыть действия нод" else "Действия нод"
+                        )
+                    }
+                }
+            ) {
+                FloatingActionButtonMenuItem(
+                    onClick = { openNewNodeDialog() },
+                    icon = { Icon(Icons.Default.Add, null) },
+                    text = { Text("Добавить ноду") }
+                )
+                FloatingActionButtonMenuItem(
+                    onClick = { importNodeFromClipboard() },
+                    icon = { Icon(Icons.Default.ContentPaste, null) },
+                    text = { Text("Вставить из буфера") }
+                )
+            }
         }
     }
 
@@ -223,6 +298,39 @@ fun NodesListSection(modifier: Modifier = Modifier) {
             }
         )
     }
+}
+
+private fun parseNodeClipboardText(text: String): NxiwNetworkServer? {
+    if (text.isBlank()) return null
+    return runCatching {
+        val json = when {
+            text.startsWith("{") -> JSONObject(text)
+            else -> {
+                val uri = Uri.parse(text)
+                if ((uri.scheme == "nxiwnetwork" || uri.scheme == "nxiw") && uri.host == "config") {
+                    val base64Data = uri.getQueryParameter("data") ?: return null
+                    JSONObject(String(Base64.decode(base64Data, Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8))
+                } else {
+                    return null
+                }
+            }
+        }
+
+        val rawHost = listOf(
+            json.optString("host", ""),
+            json.optString("ip", ""),
+            json.optString("peer", "")
+        ).firstOrNull { it.isNotBlank() }?.trim().orEmpty()
+        val parsedAddress = parseNodeAddress(rawHost) ?: return null
+        val port = json.optInt("port", parsedAddress.port ?: 56000).coerceIn(1, 65535)
+        val address = formatNodeAddress(parsedAddress.host, port)
+        NxiwNetworkServer(
+            id = json.optString("id", UUID.randomUUID().toString()),
+            name = json.optString("name", "Импортированная нода").trim().ifBlank { "Импортированная нода" },
+            ip = address,
+            password = json.optString("password", json.optString("pass", "")).trim()
+        )
+    }.getOrNull()
 }
 
 @OptIn(ExperimentalFoundationApi::class)
