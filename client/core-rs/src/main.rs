@@ -440,8 +440,14 @@ async fn stdin_loop(
 }
 
 async fn stats_loop(stats: Arc<Stats>, mut shutdown_rx: watch::Receiver<bool>) {
-    let mut ticker = time::interval(Duration::from_secs(3));
+    let mut ticker = time::interval(Duration::from_secs(1));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut last_time = std::time::Instant::now();
+    let mut last_up = 0i64;
+    let mut last_down = 0i64;
+    let mut last_packets_up = 0i64;
+    let mut last_packets_down = 0i64;
+    let mut ticks = 0u64;
     loop {
         tokio::select! {
             _ = shutdown_rx.changed() => {
@@ -456,10 +462,27 @@ async fn stats_loop(stats: Arc<Stats>, mut shutdown_rx: watch::Receiver<bool>) {
                 let up = stats.total_bytes_up.load(Ordering::Relaxed);
                 let down = stats.total_bytes_down.load(Ordering::Relaxed);
                 let dropped = stats.dropped_packets.load(Ordering::Relaxed);
+                let now = std::time::Instant::now();
+                let elapsed_seconds = now.duration_since(last_time).as_secs_f64().max(1.0);
+                let up_bps = (((up - last_up) as f64) / elapsed_seconds).max(0.0) as i64;
+                let down_bps = (((down - last_down) as f64) / elapsed_seconds).max(0.0) as i64;
+                let up_pps = (((packets_up - last_packets_up) as f64) / elapsed_seconds).max(0.0) as i64;
+                let down_pps = (((packets_down - last_packets_down) as f64) / elapsed_seconds).max(0.0) as i64;
+                println!("[CORE_METRICS] active={active} total_up={up} total_down={down} up_bps={up_bps} down_bps={down_bps} packets_up={packets_up} packets_down={packets_down} up_pps={up_pps} down_pps={down_pps} drops={dropped}");
+
                 let total_mb = (up + down) as f64 / (1024.0 * 1024.0);
                 let up_mb = up as f64 / (1024.0 * 1024.0);
                 let down_mb = down as f64 / (1024.0 * 1024.0);
-                println!("[СТАТИСТИКА] Активных: {active} | Всего: {total_mb:.2} МБ | ↑ {up_mb:.2} МБ / {packets_up} пак | ↓ {down_mb:.2} МБ / {packets_down} пак | Дропы: {dropped}");
+                ticks += 1;
+                if ticks % 3 == 0 {
+                    println!("[СТАТИСТИКА] Активных: {active} | Всего: {total_mb:.2} МБ | ↑ {up_mb:.2} МБ / {packets_up} пак | ↓ {down_mb:.2} МБ / {packets_down} пак | Дропы: {dropped}");
+                }
+
+                last_time = now;
+                last_up = up;
+                last_down = down;
+                last_packets_up = packets_up;
+                last_packets_down = packets_down;
             }
         }
     }
