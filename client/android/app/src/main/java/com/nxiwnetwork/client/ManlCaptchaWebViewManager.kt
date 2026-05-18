@@ -6,10 +6,22 @@ import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.provider.Settings
 import android.util.Log
+import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.webkit.*
+import android.widget.FrameLayout
+import android.widget.ImageButton
+import android.widget.ProgressBar
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.core.app.NotificationCompat
@@ -33,21 +45,130 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.util.concurrent.atomic.AtomicReference
+import android.graphics.Color as AndroidColor
 import kotlin.random.Random
 
 object ManlCaptchaWebViewManager {
     private const val TAG = "ManlCaptchaWV"
     private const val CAPTCHA_TIMEOUT_MS = 60_000L
+    private val interceptorJSCode = """
+        (function() {
+            if (window.__nxiw_interceptor_installed) return;
+            window.__nxiw_interceptor_installed = true;
+
+            const origFetch = window.fetch;
+            window.fetch = async function() {
+                const args = arguments;
+                const url = args[0] || '';
+                if (typeof url === 'string' && url.includes('captchaNotRobot.check')) {
+                    const response = await origFetch.apply(this, args);
+                    const clone = response.clone();
+                    try {
+                        const data = await clone.json();
+                        if (data.response && data.response.success_token) {
+                            window.NxiwCaptcha.onSuccess(data.response.success_token);
+                        } else if (data.error) {
+                            window.NxiwCaptcha.onError(JSON.stringify(data.error));
+                        }
+                    } catch(e) {}
+                    return response;
+                }
+                return origFetch.apply(this, args);
+            };
+            
+            const origXHROpen = XMLHttpRequest.prototype.open;
+            const origXHRSend = XMLHttpRequest.prototype.send;
+            XMLHttpRequest.prototype.open = function(method, url) {
+                this._nxiw_url = url;
+                return origXHROpen.apply(this, arguments);
+            };
+            XMLHttpRequest.prototype.send = function() {
+                const xhr = this;
+                if (xhr._nxiw_url && xhr._nxiw_url.includes('captchaNotRobot.check')) {
+                    xhr.addEventListener('load', function() {
+                        try {
+                            const data = JSON.parse(xhr.responseText);
+                            if (data.response && data.response.success_token) {
+                                window.NxiwCaptcha.onSuccess(data.response.success_token);
+                            } else if (data.error) {
+                                window.NxiwCaptcha.onError(JSON.stringify(data.error));
+                            }
+                        } catch(e) {}
+                    });
+                }
+                return origXHRSend.apply(this, arguments);
+            };
+        })();
+    """.trimIndent()
+
+    private val hideElementsJSCode = """
+        (function() {
+            document.addEventListener('click', function(e) {
+                if (e.target.closest('.vkc__ModalCardBase-module__dismiss')) {
+                    window.NxiwCaptcha.onCancelAndStop();
+                }
+            });
+
+            const style = document.createElement('style');
+            style.innerHTML = `
+                .vkc__VisuallyHiddenModalOverlay-module__host,
+                .vkc__ModalOverlay-module__host,
+                .vkc__KaleidoscopeScreen-module__logoBlock,
+                .vkc__KaleidoscopeScreen-module__captchaId,
+                .vkc__SliderCaptcha-module__descriptionLink,
+                .vkc__SliderCaptcha-module__changeTypeButton {
+                    display: none !important;
+                }
+                
+                body, html, .vkc__ModalCard-module__host, .vkc__AppRoot-module__host, .vkui__root {
+                    background: transparent !important;
+                    box-shadow: none !important;
+                }
+                
+                .vkc__ModalCardBase-module__container {
+                    background: #000000 !important;
+                    box-shadow: none !important;
+                }
+
+                .vkc__ModalCardBase-module__dismiss {
+                    color: #ef4444 !important;
+                    transform: scale(0.8) translateX(-12px) !important;
+                }
+                .vkc__ModalCardBase-module__dismiss svg {
+                    fill: #ef4444 !important;
+                }
+
+                .vkc__RefreshButton-module__text,
+                .vkc__SliderCaptcha-module__description {
+                    color: #ffffff !important;
+                }
+
+                .vkc__SwipeButton-module__track {
+                    background-color: #ffffff !important;
+                }
+
+                .vkc__SwipeButton-module__track span {
+                    color: #0000FF !important;
+                }
+            `;
+            document.head.appendChild(style);
+        })();
+    """.trimIndent()
 
     val captchaMutex = Mutex()
     val pendingResult = AtomicReference<CompletableDeferred<Result<String>>?>(null)
     var activeActivity: ManlCaptchaActivity? = null
     var pendingIntentToStart: Intent? = null
     var isCaptchaPending = false
+    private var overlayRoot: View? = null
+    private var overlayWebView: WebView? = null
 
     fun checkAndShowPendingCaptcha(context: Context) {
         val intent = pendingIntentToStart
@@ -57,6 +178,10 @@ object ManlCaptchaWebViewManager {
     }
 
     fun cancelCaptcha() {
+        runOnMain {
+            dismissOverlayCaptcha()
+            activeActivity?.finish()
+        }
         pendingResult.get()?.completeExceptionally(kotlin.coroutines.cancellation.CancellationException("Cancelled by system"))
     }
 
@@ -109,22 +234,222 @@ object ManlCaptchaWebViewManager {
         notificationManager.cancel(NOTIFICATION_ID)
     }
 
+    private fun canDrawOverlay(context: Context): Boolean {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context)
+    }
+
+    private fun runOnMain(action: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            action()
+        } else {
+            Handler(Looper.getMainLooper()).post(action)
+        }
+    }
+
+    private fun showOverlayCaptcha(context: Context, redirectUri: String): Boolean {
+        if (!canDrawOverlay(context)) return false
+
+        val appContext = context.applicationContext
+        val windowManager = appContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        dismissOverlayCaptcha()
+
+        return runCatching {
+            val root = FrameLayout(appContext).apply {
+                setBackgroundColor(AndroidColor.TRANSPARENT)
+                isFocusable = true
+                isFocusableInTouchMode = true
+            }
+            val progress = ProgressBar(appContext).apply {
+                isIndeterminate = true
+            }
+            val webView = createManualCaptchaWebView(appContext, redirectUri) {
+                progress.visibility = View.GONE
+            }
+
+            val closeBackground = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(0xCC000000.toInt())
+            }
+            val closeButton = ImageButton(appContext).apply {
+                setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
+                setColorFilter(AndroidColor.WHITE)
+                background = closeBackground
+                contentDescription = "Закрыть капчу"
+                setOnClickListener {
+                    TunnelManager.stop()
+                    notifyResult(Result.failure(Exception("Cancelled and stopped by user")))
+                    dismissOverlayCaptcha()
+                }
+            }
+
+            root.addView(
+                webView,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                )
+            )
+            root.addView(
+                progress,
+                FrameLayout.LayoutParams(64.dpToPx(appContext), 64.dpToPx(appContext), Gravity.CENTER)
+            )
+            root.addView(
+                closeButton,
+                FrameLayout.LayoutParams(48.dpToPx(appContext), 48.dpToPx(appContext), Gravity.TOP or Gravity.END).apply {
+                    topMargin = 24.dpToPx(appContext)
+                    marginEnd = 16.dpToPx(appContext)
+                }
+            )
+
+            val params = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                } else {
+                    @Suppress("DEPRECATION")
+                    WindowManager.LayoutParams.TYPE_PHONE
+                },
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.CENTER
+                title = "Nxiw captcha overlay"
+            }
+
+            overlayRoot = root
+            overlayWebView = webView
+            windowManager.addView(root, params)
+            root.requestFocus()
+            true
+        }.getOrElse { error ->
+            Log.e(TAG, "Overlay captcha failed: ${error.message}")
+            dismissOverlayCaptcha()
+            false
+        }
+    }
+
+    private fun createManualCaptchaWebView(
+        context: Context,
+        redirectUri: String,
+        onLoaded: () -> Unit
+    ): WebView {
+        return WebView(context).apply {
+            setBackgroundColor(AndroidColor.TRANSPARENT)
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                databaseEnabled = true
+                mediaPlaybackRequiresUserGesture = false
+                loadWithOverviewMode = true
+                useWideViewPort = true
+                blockNetworkLoads = false
+                cacheMode = WebSettings.LOAD_DEFAULT
+                userAgentString = "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+            }
+
+            addJavascriptInterface(object {
+                @JavascriptInterface
+                fun onSuccess(token: String) {
+                    Log.d(TAG, "Token received")
+                    notifyResult(Result.success(token))
+                    dismissOverlayCaptcha()
+                    activeActivity?.finish()
+                }
+
+                @JavascriptInterface
+                fun onError(err: String) {
+                    Log.e(TAG, "Error: $err")
+                    notifyResult(Result.failure(Exception("VK Captcha error: $err")))
+                    dismissOverlayCaptcha()
+                    activeActivity?.finish()
+                }
+
+                @JavascriptInterface
+                fun onCancelAndStop() {
+                    Log.d(TAG, "User clicked VK Close. Stopping tunnel.")
+                    TunnelManager.stop()
+                    notifyResult(Result.failure(Exception("Cancelled and stopped by user")))
+                    dismissOverlayCaptcha()
+                    activeActivity?.finish()
+                }
+            }, "NxiwCaptcha")
+
+            webViewClient = object : WebViewClient() {
+                override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                    super.onPageStarted(view, url, favicon)
+                    view?.evaluateJavascript(interceptorJSCode, null)
+                }
+
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    super.onPageFinished(view, url)
+                    view?.evaluateJavascript(interceptorJSCode, null)
+                    view?.evaluateJavascript(hideElementsJSCode, null)
+                    onLoaded()
+                }
+            }
+            webChromeClient = WebChromeClient()
+            loadUrl(redirectUri)
+        }
+    }
+
+    private fun dismissOverlayCaptcha() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            runOnMain { dismissOverlayCaptcha() }
+            return
+        }
+
+        val root = overlayRoot
+        val webView = overlayWebView
+        overlayRoot = null
+        overlayWebView = null
+
+        runCatching {
+            webView?.stopLoading()
+            webView?.removeJavascriptInterface("NxiwCaptcha")
+            webView?.webViewClient = WebViewClient()
+            webView?.destroy()
+        }
+
+        if (root != null) {
+            runCatching {
+                val windowManager = root.context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                windowManager.removeView(root)
+            }.onFailure { error ->
+                Log.e(TAG, "Overlay dismiss failed: ${error.message}")
+            }
+        }
+    }
+
     suspend fun solveCaptchaAsync(context: Context, redirectUri: String, sessionToken: String): String {
         return captchaMutex.withLock {
             isCaptchaPending = true
             val deferred = CompletableDeferred<Result<String>>()
             // Если предыдущий вызов завис, отменяем его
             pendingResult.getAndSet(deferred)?.cancel()
+            val useOverlay = runCatching {
+                SettingsStore(context).manualCaptchaOverlay.first()
+            }.getOrDefault(false)
+            val overlayShown = useOverlay && withContext(Dispatchers.Main.immediate) {
+                showOverlayCaptcha(context, redirectUri)
+            }
 
-            showCaptchaNotification(context, redirectUri)
+            if (!overlayShown) {
+                showCaptchaNotification(context, redirectUri)
+            }
 
             val intent = Intent(context, ManlCaptchaActivity::class.java).apply {
                 putExtra("redirectUri", redirectUri)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS)
             }
-            pendingIntentToStart = intent
+            pendingIntentToStart = if (overlayShown) null else intent
 
-            if (MainActivity.isForeground) {
+            if (!overlayShown && MainActivity.isForeground) {
                 // Запускаем окно только если интерфейс приложения активен (иначе Android блокирует старт)
                 context.startActivity(intent)
             }
@@ -138,12 +463,15 @@ object ManlCaptchaWebViewManager {
                 pendingResult.set(null)
                 pendingIntentToStart = null
                 clearCaptchaNotification(context)
-                try {
-                    activeActivity?.finish()
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error finishing activity: ${e.message}")
+                withContext(Dispatchers.Main.immediate) {
+                    dismissOverlayCaptcha()
+                    try {
+                        activeActivity?.finish()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error finishing activity: ${e.message}")
+                    }
+                    activeActivity = null
                 }
-                activeActivity = null
             }
         }
     }
@@ -154,6 +482,10 @@ object ManlCaptchaWebViewManager {
             deferred.complete(result)
         }
     }
+}
+
+private fun Int.dpToPx(context: Context): Int {
+    return (this * context.resources.displayMetrics.density).toInt()
 }
 
 class ManlCaptchaActivity : ComponentActivity() {
@@ -381,7 +713,7 @@ class ManlCaptchaActivity : ComponentActivity() {
 class CaptchaCancelReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         TunnelManager.stop()
-        ManlCaptchaWebViewManager.activeActivity?.finish()
+        ManlCaptchaWebViewManager.cancelCaptcha()
         val notifMgr = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         notifMgr.cancel(9001) // NOTIFICATION_ID
     }

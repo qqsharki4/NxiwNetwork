@@ -76,6 +76,7 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
     val pingMetricsUi by settingsStore.pingMetricsUi.collectAsStateWithLifecycle(true)
     val speedMetricModeRaw by settingsStore.speedMetricMode.collectAsStateWithLifecycle(SettingsStore.DEFAULT_SPEED_METRIC_MODE)
     val graphSpeedMetricModeRaw by settingsStore.graphSpeedMetricMode.collectAsStateWithLifecycle(SettingsStore.DEFAULT_SPEED_METRIC_MODE)
+    val manualCaptchaOverlay by settingsStore.manualCaptchaOverlay.collectAsStateWithLifecycle(false)
     val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
     val activeBackend by TunnelManager.activeCoreBackend.collectAsStateWithLifecycle()
     val activeWorkers by TunnelManager.activeWorkers.collectAsStateWithLifecycle()
@@ -99,6 +100,10 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
     val dashboardWidgets = remember(dashboardWidgetsRaw) { parseDashboardWidgets(dashboardWidgetsRaw) }
     val speedMetricMode = parseSpeedMetricMode(speedMetricModeRaw)
     val graphSpeedMetricMode = parseSpeedMetricMode(graphSpeedMetricModeRaw)
+    var overlayPermissionRefresh by remember { mutableIntStateOf(0) }
+    val overlayPermissionGranted = remember(overlayPermissionRefresh) {
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.M || AndroidSettings.canDrawOverlays(appContext)
+    }
 
     fun copyDebugText(label: String, text: String, toast: String) {
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -149,6 +154,8 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
         pingMetricsUi,
         speedMetricModeRaw,
         graphSpeedMetricModeRaw,
+        manualCaptchaOverlay,
+        overlayPermissionGranted,
         diagnostics
     ) {
         buildDebugSnapshot(
@@ -182,6 +189,8 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
             pingMetricsUi = pingMetricsUi,
             speedMetricMode = speedMetricMode,
             graphSpeedMetricMode = graphSpeedMetricMode,
+            manualCaptchaOverlay = manualCaptchaOverlay,
+            overlayPermissionGranted = overlayPermissionGranted,
             diagnostics = diagnostics
         )
     }
@@ -286,6 +295,24 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
                             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                             setDashboardWidget(widget, enabled)
                         }
+                    }
+
+                    DebugSectionTitle("Капча")
+                    DebugSwitchRow("WebView поверх приложений", "Devtools-флаг. Если включен и Android-разрешение выдано, ручная капча откроется overlay-окном поверх других приложений.", manualCaptchaOverlay) { enabled ->
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        scope.launch { settingsStore.saveManualCaptchaOverlay(enabled) }
+                    }
+                    DebugToolButton(
+                        Icons.Default.OpenInNew,
+                        "Разрешение поверх окон",
+                        if (overlayPermissionGranted) "Разрешение уже выдано." else "Откроет системный экран «Показывать поверх других приложений»."
+                    ) {
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        overlayPermissionRefresh++
+                        openSystemIntent(
+                            Intent(AndroidSettings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${appContext.packageName}")),
+                            "Не удалось открыть настройки overlay-разрешения"
+                        )
                     }
 
                     DebugSectionTitle("Переключатели")
@@ -782,6 +809,8 @@ private fun buildDebugSnapshot(
     pingMetricsUi: Boolean,
     speedMetricMode: SpeedMetricMode,
     graphSpeedMetricMode: SpeedMetricMode,
+    manualCaptchaOverlay: Boolean,
+    overlayPermissionGranted: Boolean,
     diagnostics: AppDiagnosticsSnapshot
 ): String = buildString {
     appendLine("NxiwNetwork Debug")
@@ -810,6 +839,7 @@ private fun buildDebugSnapshot(
     appendLine("Ping metrics UI: $pingMetricsUi")
     appendLine("Speed metric mode: ${speedMetricMode.id}")
     appendLine("Graph speed metric mode: ${graphSpeedMetricMode.id}")
+    appendLine("Manual captcha overlay: enabled=$manualCaptchaOverlay permission=$overlayPermissionGranted")
     appendLine("Diagnostics enabled: ${diagnostics.enabled}")
     appendLine("Diagnostics uptime: ${formatDiagnosticsUptime(diagnostics)}")
     appendLine("Diagnostics app memory: ${formatAppMemory(diagnostics)}")
