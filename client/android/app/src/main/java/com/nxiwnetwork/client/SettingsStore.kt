@@ -61,12 +61,13 @@ class SettingsStore(context: Context) {
         private val DIAGNOSTICS_TRAFFIC_METRICS = booleanPreferencesKey("diagnostics_traffic_metrics")
         private val DIAGNOSTICS_BATTERY_METRICS = booleanPreferencesKey("diagnostics_battery_metrics")
         private val DASHBOARD_WIDGETS = stringPreferencesKey("dashboard_widgets")
+        private val DASHBOARD_NODE_WIDGET_MIGRATED = booleanPreferencesKey("dashboard_node_widget_migrated")
         private val CORE_TRAFFIC_METRICS_UI = booleanPreferencesKey("core_traffic_metrics_ui")
         private val PING_METRICS_UI = booleanPreferencesKey("ping_metrics_ui")
         private val SPEED_METRIC_MODE = stringPreferencesKey("speed_metric_mode")
         private val GRAPH_SPEED_METRIC_MODE = stringPreferencesKey("graph_speed_metric_mode")
         private val MANUAL_CAPTCHA_OVERLAY = booleanPreferencesKey("manual_captcha_overlay")
-        const val DEFAULT_DASHBOARD_WIDGETS = "PING,SESSION,WORKERS,SPEED,GRAPH"
+        const val DEFAULT_DASHBOARD_WIDGETS = "NODE,CONTROL,PING,SESSION,WORKERS,SPEED,GRAPH"
         const val DEFAULT_SPEED_METRIC_MODE = "total"
         private val SPEED_METRIC_MODES = setOf("total", "up", "down")
 	
@@ -116,6 +117,7 @@ class SettingsStore(context: Context) {
     val diagnosticsTrafficMetrics: Flow<Boolean> = dataStore.data.map { it[DIAGNOSTICS_TRAFFIC_METRICS] ?: true }
     val diagnosticsBatteryMetrics: Flow<Boolean> = dataStore.data.map { it[DIAGNOSTICS_BATTERY_METRICS] ?: true }
     val dashboardWidgets: Flow<String> = dataStore.data.map { it[DASHBOARD_WIDGETS] ?: DEFAULT_DASHBOARD_WIDGETS }
+    val dashboardNodeWidgetMigrated: Flow<Boolean> = dataStore.data.map { it[DASHBOARD_NODE_WIDGET_MIGRATED] ?: false }
     val coreTrafficMetricsUi: Flow<Boolean> = dataStore.data.map { it[CORE_TRAFFIC_METRICS_UI] ?: true }
     val pingMetricsUi: Flow<Boolean> = dataStore.data.map { it[PING_METRICS_UI] ?: true }
     val speedMetricMode: Flow<String> = dataStore.data.map { normalizeSpeedMetricMode(it[SPEED_METRIC_MODE]) }
@@ -183,6 +185,7 @@ class SettingsStore(context: Context) {
     suspend fun saveDiagnosticsTrafficMetrics(enabled: Boolean) { dataStore.edit { prefs -> prefs[DIAGNOSTICS_TRAFFIC_METRICS] = enabled } }
     suspend fun saveDiagnosticsBatteryMetrics(enabled: Boolean) { dataStore.edit { prefs -> prefs[DIAGNOSTICS_BATTERY_METRICS] = enabled } }
     suspend fun saveDashboardWidgets(widgets: String) { dataStore.edit { prefs -> prefs[DASHBOARD_WIDGETS] = widgets } }
+    suspend fun saveDashboardNodeWidgetMigrated(migrated: Boolean) { dataStore.edit { prefs -> prefs[DASHBOARD_NODE_WIDGET_MIGRATED] = migrated } }
     suspend fun saveCoreTrafficMetricsUi(enabled: Boolean) { dataStore.edit { prefs -> prefs[CORE_TRAFFIC_METRICS_UI] = enabled } }
     suspend fun savePingMetricsUi(enabled: Boolean) { dataStore.edit { prefs -> prefs[PING_METRICS_UI] = enabled } }
     suspend fun saveSpeedMetricMode(mode: String) { dataStore.edit { prefs -> prefs[SPEED_METRIC_MODE] = normalizeSpeedMetricMode(mode) } }

@@ -54,12 +54,15 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.zIndex
@@ -84,8 +87,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.InetSocketAddress
 import java.net.Socket
-import java.util.Collections
 import java.util.UUID
+import kotlin.math.roundToInt
 
 data class NxiwNetworkServer(
     val id: String = UUID.randomUUID().toString(),
@@ -107,7 +110,9 @@ val captchaMethodOptions = listOf(
     "rjs_slider" to "Slider"
 )
 
-enum class WidgetType(val title: String, val icon: ImageVector, val isWide: Boolean = false) {
+enum class WidgetType(val title: String, val icon: ImageVector, val isWide: Boolean = false, val isUserWidget: Boolean = true) {
+    NODE("Текущая нода", Icons.Default.Dns, isWide = true),
+    CONTROL("Подключение", Icons.Default.PowerSettingsNew, isWide = true, isUserWidget = false),
     PING("Пинг", Icons.Default.NetworkPing),
     SESSION("Сессия", Icons.Default.Timer),
     WORKERS("Воркеры", Icons.Default.Hub),
@@ -134,13 +139,22 @@ fun speedMetricValue(mode: SpeedMetricMode, uploadBytes: Long, downloadBytes: Lo
 }
 
 fun parseDashboardWidgets(raw: String): List<WidgetType> {
-    if (raw.isBlank()) return emptyList()
-    val parsed = raw.split(",")
-        .mapNotNull { name -> WidgetType.entries.find { it.name == name.trim() } }
-        .distinct()
-    return parsed.ifEmpty {
+    val parsed = if (raw.isBlank()) {
+        emptyList()
+    } else {
+        raw.split(",")
+            .mapNotNull { name -> WidgetType.entries.find { it.name == name.trim() } }
+            .distinct()
+    }
+    val widgets = parsed.ifEmpty {
         SettingsStore.DEFAULT_DASHBOARD_WIDGETS.split(",")
             .mapNotNull { name -> WidgetType.entries.find { it.name == name } }
+    }
+    if (WidgetType.CONTROL in widgets) return widgets
+
+    val insertIndex = widgets.indexOf(WidgetType.NODE).takeIf { it >= 0 }?.plus(1) ?: 0
+    return widgets.toMutableList().apply {
+        add(insertIndex.coerceIn(0, size), WidgetType.CONTROL)
     }
 }
 
@@ -185,6 +199,7 @@ fun SettingsTab() {
     val captchaMethod by settingsStore.captchaSolveMethod.collectAsStateWithLifecycle("manual")
     val savedServersJson by settingsStore.savedServersJson.collectAsStateWithLifecycle("[]")
     val dashboardWidgetsRaw by settingsStore.dashboardWidgets.collectAsStateWithLifecycle(SettingsStore.DEFAULT_DASHBOARD_WIDGETS)
+    val dashboardNodeWidgetMigrated by settingsStore.dashboardNodeWidgetMigrated.collectAsStateWithLifecycle(false)
     val speedMetricModeRaw by settingsStore.speedMetricMode.collectAsStateWithLifecycle(SettingsStore.DEFAULT_SPEED_METRIC_MODE)
     val graphSpeedMetricModeRaw by settingsStore.graphSpeedMetricMode.collectAsStateWithLifecycle(SettingsStore.DEFAULT_SPEED_METRIC_MODE)
     val speedMetricMode = parseSpeedMetricMode(speedMetricModeRaw)
@@ -201,10 +216,17 @@ fun SettingsTab() {
     var activeWidgetList by remember { mutableStateOf(listOf<WidgetType>()) }
     var availableWidgetList by remember { mutableStateOf(listOf<WidgetType>()) }
 
-    LaunchedEffect(dashboardWidgetsRaw) {
-        val active = parseDashboardWidgets(dashboardWidgetsRaw)
+    LaunchedEffect(dashboardWidgetsRaw, dashboardNodeWidgetMigrated) {
+        var active = parseDashboardWidgets(dashboardWidgetsRaw)
+        if (!dashboardNodeWidgetMigrated) {
+            if (WidgetType.NODE !in active) {
+                active = listOf(WidgetType.NODE) + active
+                settingsStore.saveDashboardWidgets(encodeDashboardWidgets(active))
+            }
+            settingsStore.saveDashboardNodeWidgetMigrated(true)
+        }
         activeWidgetList = active
-        availableWidgetList = WidgetType.entries - active.toSet()
+        availableWidgetList = WidgetType.entries.filter { it.isUserWidget } - active.toSet()
     }
 
     LaunchedEffect(savedServersJson) {
@@ -244,7 +266,7 @@ fun SettingsTab() {
 
     fun updateWidgetOrder(newList: List<WidgetType>) {
         activeWidgetList = newList
-        availableWidgetList = WidgetType.entries - newList.toSet()
+        availableWidgetList = WidgetType.entries.filter { it.isUserWidget } - newList.toSet()
         scope.launch { settingsStore.saveDashboardWidgets(encodeDashboardWidgets(newList)) }
     }
 
@@ -276,249 +298,432 @@ fun SettingsTab() {
             ) { Icon(if (isEditMode) Icons.Default.Check else Icons.Default.Edit, null, tint = if (isEditMode) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant) }
         }
 
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .graphicsLayer { if (isEditMode) { rotationZ = jiggleRotation * 0.5f; translationX = jiggleTx; translationY = jiggleTy } },
-            shape = RoundedCornerShape(28.dp), color = MaterialTheme.colorScheme.surfaceContainerHighest, tonalElevation = 2.dp
-        ) {
-            Row(modifier = Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
-                Surface(modifier = Modifier.size(52.dp), shape = CircleShape, color = MaterialTheme.colorScheme.primary) {
-                    Box(contentAlignment = Alignment.Center) { Icon(Icons.Default.Dns, null, tint = MaterialTheme.colorScheme.onPrimary) }
-                }
-                Spacer(modifier = Modifier.width(16.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("Текущая нода", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(activeServer?.name ?: "Не выбран", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.onSurface)
-                }
-                if (isEditMode) {
-                    Icon(Icons.Default.DragHandle, null, tint = MaterialTheme.colorScheme.outline)
+        DashboardWidgetsSection(
+            activeWidgetList = activeWidgetList,
+            availableWidgetList = availableWidgetList,
+            isEditMode = isEditMode,
+            tunnelRunning = tunnelRunning,
+            cooldownSeconds = cooldownSeconds,
+            protocol = protocol,
+            currentPing = currentPing,
+            timerString = timerString,
+            activeWorkers = activeWorkers,
+            displayedSpeed = displayedSpeed,
+            displayedGraphSpeed = displayedGraphSpeed,
+            currentUploadSpeed = currentUploadSpeed,
+            currentDownloadSpeed = currentDownloadSpeed,
+            displayedGraphPoints = displayedGraphPoints,
+            activeServerName = activeServer?.name ?: "Не выбран",
+            jiggleRotation = jiggleRotation,
+            jiggleTx = jiggleTx,
+            jiggleTy = jiggleTy,
+            haptic = haptic,
+            onUpdateWidgetOrder = ::updateWidgetOrder,
+            onDiagnosticsClick = { showDiagnosticDialog = true },
+            onProtocolSelected = { selectedProtocol ->
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                scope.launch { settingsStore.save(peer, hashes, "", workers, selectedProtocol, port, sni) }
+            },
+            onPowerClick = {
+                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                if (tunnelRunning) {
+                    context.startService(Intent(context, TunnelService::class.java).apply { action = "STOP" })
                 } else {
-                    IconButton(onClick = { showDiagnosticDialog = true }) { Icon(Icons.Default.HealthAndSafety, null, tint = MaterialTheme.colorScheme.primary) }
+                    if (peer.isBlank() || hashes.isBlank()) {
+                        Toast.makeText(context, "Выберите ноду и укажите хеши!", Toast.LENGTH_SHORT).show()
+                    } else {
+                        val intent = Intent(context, TunnelService::class.java).apply {
+                            action = "START"
+                            putExtra("peer", normalizeNodeEndpoint(peer))
+                            putExtra("vk_hashes", hashes)
+                            putExtra("workers_per_hash", workers)
+                            putExtra("port", port)
+                            putExtra("sni", sni)
+                            putExtra("connection_password", connPass.trim())
+                            putExtra("protocol", protocol)
+                            putExtra("captcha_mode", captchaModeForMethod(captchaMethod))
+                            putExtra("wifi_high_performance", wifiHighPerformance)
+                            putExtra("client_keepalive_seconds", clientKeepaliveSeconds)
+                        }
+                        startTunnelWithPermission(intent)
+                    }
                 }
             }
-        }
-
-        Row(modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 32.dp), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-            FilterChip(selected = protocol == "udp", onClick = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); scope.launch { settingsStore.save(peer, hashes, "", workers, "udp", port, sni) } }, label = { Text("UDP", fontWeight = FontWeight.Bold) }, enabled = !tunnelRunning)
-            Spacer(modifier = Modifier.width(12.dp))
-            FilterChip(selected = protocol == "tcp", onClick = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); scope.launch { settingsStore.save(peer, hashes, "", workers, "tcp", port, sni) } }, label = { Text("TCP", fontWeight = FontWeight.Bold) }, enabled = !tunnelRunning)
-        }
-
-        val connectionStatusText = when {
-            tunnelRunning -> "Подключено"
-            cooldownSeconds > 4 -> "Подключение..."
-            cooldownSeconds > 2 -> "Проверка конфигурации..."
-            cooldownSeconds > 0 -> "Установка туннеля..."
-            else -> "Нажмите для старта"
-        }
-
-        val mainBtnInteractionSource = remember { MutableInteractionSource() }
-        val isMainBtnPressed by mainBtnInteractionSource.collectIsPressedAsState()
-        val buttonScale by animateFloatAsState(
-            targetValue = when { isMainBtnPressed -> 0.88f; tunnelRunning -> 1.05f; else -> 1f },
-            animationSpec = spring(dampingRatio = 0.5f, stiffness = Spring.StiffnessMediumLow), label = "mainBtnScale"
         )
 
-        Box(contentAlignment = Alignment.Center, modifier = Modifier.size(240.dp)) {
-            if (tunnelRunning || cooldownSeconds > 0) PremiumRadarWaves(tunnelRunning)
-            
-            val circleColor by animateColorAsState(targetValue = if (tunnelRunning) MaterialTheme.colorScheme.primary else if (cooldownSeconds > 0) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.surfaceVariant, animationSpec = tween(500, easing = LinearOutSlowInEasing), label = "")
-            val iconColor by animateColorAsState(targetValue = if (tunnelRunning || cooldownSeconds > 0) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant, label = "")
-            
-            Surface(
-                modifier = Modifier
-                    .size(150.dp)
-                    .scale(buttonScale)
-                    .clip(CircleShape)
-                    .clickable(
-                        interactionSource = mainBtnInteractionSource, indication = null,
-                        enabled = cooldownSeconds == 0 || tunnelRunning
-                    ) {
-                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        if (tunnelRunning) {
-                            context.startService(Intent(context, TunnelService::class.java).apply { action = "STOP" })
-                        } else {
-                            if (peer.isBlank() || hashes.isBlank()) { Toast.makeText(context, "Выберите ноду и укажите хеши!", Toast.LENGTH_SHORT).show(); return@clickable }
-                            val intent = Intent(context, TunnelService::class.java).apply {
-                                action = "START"
-                                putExtra("peer", normalizeNodeEndpoint(peer))
-                                putExtra("vk_hashes", hashes)
-                                putExtra("workers_per_hash", workers)
-                                putExtra("port", port)
-                                putExtra("sni", sni)
-                                putExtra("connection_password", connPass.trim())
-                                putExtra("protocol", protocol)
-                                putExtra("captcha_mode", captchaModeForMethod(captchaMethod))
-                                putExtra("wifi_high_performance", wifiHighPerformance)
-                                putExtra("client_keepalive_seconds", clientKeepaliveSeconds)
-                            }
-                            startTunnelWithPermission(intent)
-                        }
-                    },
-                shape = CircleShape, color = circleColor, shadowElevation = if (tunnelRunning) 24.dp else 8.dp
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    if (cooldownSeconds > 0 && !tunnelRunning) {
-                        CircularProgressIndicator(color = iconColor, modifier = Modifier.size(70.dp), strokeWidth = 6.dp, strokeCap = StrokeCap.Round)
-                    } else {
-                        Icon(if (tunnelRunning) Icons.Default.Shield else Icons.Default.PowerSettingsNew, null, modifier = Modifier.size(68.dp), tint = iconColor)
-                    }
-                }
-            }
-        }
-        
-        AnimatedContent(
-            targetState = connectionStatusText,
-            transitionSpec = { slideInVertically { it / 2 } + fadeIn(tween(300)) togetherWith slideOutVertically { -it / 2 } + fadeOut(tween(300)) },
-            label = "statusText"
-        ) { text ->
-            Text(text, style = MaterialTheme.typography.titleMedium, color = if (tunnelRunning) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 16.dp, bottom = 24.dp))
-        }
-
-        // Логика Drag-and-Drop (С zIndex для предотвращения проваливания!)
-        val gridState = rememberLazyGridState()
-        var draggingWidgetIndex by remember { mutableStateOf<Int?>(null) }
-
-        LazyVerticalGrid(
-            state = gridState,
-            columns = GridCells.Fixed(2),
-            modifier = Modifier.fillMaxWidth().heightIn(max = 1000.dp).pointerInput(isEditMode, activeWidgetList) {
-                if (!isEditMode) return@pointerInput
-                detectDragGesturesAfterLongPress(
-                    onDragStart = { offset ->
-                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        val item = gridState.layoutInfo.visibleItemsInfo.find {
-                            offset.x >= it.offset.x && offset.x <= it.offset.x + it.size.width &&
-                            offset.y >= it.offset.y && offset.y <= it.offset.y + it.size.height
-                        }
-                        draggingWidgetIndex = item?.index
-                    },
-                    onDrag = { change, _ ->
-                        val pointer = change.position
-                        val hoveredItem = gridState.layoutInfo.visibleItemsInfo.find {
-                            pointer.x >= it.offset.x && pointer.x <= it.offset.x + it.size.width &&
-                            pointer.y >= it.offset.y && pointer.y <= it.offset.y + it.size.height
-                        }
-                        if (hoveredItem != null && draggingWidgetIndex != null && hoveredItem.index != draggingWidgetIndex) {
-                            val from = draggingWidgetIndex!!
-                            val to = hoveredItem.index
-                            if (from in activeWidgetList.indices && to in activeWidgetList.indices) {
-                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                val list = activeWidgetList.toMutableList()
-                                val temp = list[from]
-                                list[from] = list[to]
-                                list[to] = temp
-                                updateWidgetOrder(list)
-                                draggingWidgetIndex = to
-                            }
-                        }
-                    },
-                    onDragEnd = { draggingWidgetIndex = null },
-                    onDragCancel = { draggingWidgetIndex = null }
-                )
-            },
-            horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp), userScrollEnabled = false,
-            contentPadding = PaddingValues(bottom = 12.dp) // Предотвращает обрезание теней
-        ) {
-            items(activeWidgetList, key = { it.name }, span = { if (it.isWide) GridItemSpan(maxLineSpan) else GridItemSpan(1) }) { widget ->
-                val index = activeWidgetList.indexOf(widget)
-                val isDragging = draggingWidgetIndex == index
-                val rotate = if (isEditMode && !isDragging) (if (index % 2 == 0) jiggleRotation else -jiggleRotation) else 0f
-                val tx = if (isEditMode && !isDragging) (if (index % 3 == 0) jiggleTx else -jiggleTx) else 0f
-                val ty = if (isEditMode && !isDragging) (if (index % 2 != 0) jiggleTy else -jiggleTy) else 0f
-                
-                Box(
-                    modifier = Modifier
-                        .animateItem()
-                        .zIndex(if (isDragging) 10f else 0f) // ВАЖНО: тянущийся элемент всегда сверху
-                        .graphicsLayer { 
-                            rotationZ = rotate
-                            translationX = tx.dp.toPx()
-                            translationY = ty.dp.toPx()
-                            scaleX = if (isDragging) 1.08f else 1f
-                            scaleY = if (isDragging) 1.08f else 1f
-                            shadowElevation = if (isDragging) 30f else 0f 
-                        }
-                ) {
-                    if (widget == WidgetType.GRAPH) {
-                        SpeedGraphCard(
-                            isRunning = tunnelRunning,
-                            currentSpeedBytes = displayedGraphSpeed,
-                            uploadSpeedBytes = currentUploadSpeed,
-                            downloadSpeedBytes = currentDownloadSpeed,
-                            points = displayedGraphPoints,
-                            modifier = Modifier.height(160.dp)
-                        )
-                    } else {
-                        DashboardCard(title = widget.title, icon = widget.icon, modifier = Modifier.height(130.dp)) {
-                            val value = when (widget) {
-                                WidgetType.PING -> if (tunnelRunning && currentPing > 0) "${currentPing} ms" else "--"
-                                WidgetType.SESSION -> if (tunnelRunning) timerString else "00:00:00"
-                                WidgetType.WORKERS -> "$activeWorkers"
-                                WidgetType.SPEED -> {
-                                    val speedKb = displayedSpeed / 1024f
-                                    if (tunnelRunning) if (speedKb > 1024) String.format("%.1f MB/s", speedKb / 1024f) else String.format("%.0f KB/s", speedKb) else "0 KB/s"
-                                }
-                                else -> ""
-                            }
-                            AnimatedDashboardValue(value)
-                        }
-                    }
-                    
-                    // Кнопки больше не обрезаются, так как находятся ВНУТРИ карточки (через padding)
-                    androidx.compose.animation.AnimatedVisibility(
-                        visible = isEditMode,
-                        enter = scaleIn(spring(stiffness = Spring.StiffnessMediumLow)), exit = scaleOut(spring(stiffness = Spring.StiffnessMediumLow)),
-                        modifier = Modifier.align(Alignment.TopEnd).padding(12.dp)
-                    ) {
-                        Surface(
-                            onClick = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); updateWidgetOrder(activeWidgetList - widget) },
-                            shape = CircleShape, color = MaterialTheme.colorScheme.errorContainer, modifier = Modifier.size(32.dp)
-                        ) {
-                            Box(contentAlignment = Alignment.Center) { Icon(Icons.Default.Remove, null, tint = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.size(20.dp)) }
-                        }
-                    }
-                }
-            }
-        }
-
-        androidx.compose.animation.AnimatedVisibility(visible = isEditMode && availableWidgetList.isNotEmpty(), enter = expandVertically(spring(stiffness = Spring.StiffnessMediumLow)) + fadeIn(), exit = shrinkVertically(spring(stiffness = Spring.StiffnessMediumLow)) + fadeOut()) {
-            Column(modifier = Modifier.fillMaxWidth().padding(top = 24.dp)) {
-                Text("Доступные виджеты", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 12.dp))
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(2), modifier = Modifier.fillMaxWidth().heightIn(max = 400.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp), userScrollEnabled = false,
-                    contentPadding = PaddingValues(bottom = 12.dp)
-                ) {
-                    items(availableWidgetList, key = { it.name }, span = { if (it.isWide) GridItemSpan(maxLineSpan) else GridItemSpan(1) }) { widget ->
-                        val index = availableWidgetList.indexOf(widget)
-                        val rotate = (if (index % 2 == 0) -jiggleRotation else jiggleRotation) * 0.7f
-                        
-                        Box(modifier = Modifier.animateItem().graphicsLayer { rotationZ = rotate; alpha = 0.8f }) {
-                            Surface(modifier = Modifier.fillMaxWidth().height(if(widget.isWide) 80.dp else 130.dp), shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
-                                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-                                    Icon(widget.icon, null, modifier = Modifier.size(28.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    Spacer(Modifier.height(8.dp))
-                                    Text(widget.title, style = MaterialTheme.typography.labelLarge)
-                                }
-                            }
-                            // Кнопка добавления внутри карточки
-                            Surface(
-                                onClick = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); updateWidgetOrder(activeWidgetList + widget) },
-                                shape = CircleShape, color = Color(0xFF4CAF50), modifier = Modifier.align(Alignment.TopEnd).padding(12.dp).size(32.dp)
-                            ) {
-                                Box(contentAlignment = Alignment.Center) { Icon(Icons.Default.Add, null, tint = Color.White, modifier = Modifier.size(20.dp)) }
-                            }
-                        }
-                    }
-                }
-            }
-        }
         Spacer(modifier = Modifier.height(32.dp))
     }
 
     if (showDiagnosticDialog) DiagnosticDialog(context = context, peer = peer, hashes = hashes) { showDiagnosticDialog = false }
+}
+
+@Composable
+private fun DashboardWidgetsSection(
+    activeWidgetList: List<WidgetType>,
+    availableWidgetList: List<WidgetType>,
+    isEditMode: Boolean,
+    tunnelRunning: Boolean,
+    cooldownSeconds: Int,
+    protocol: String,
+    currentPing: Int,
+    timerString: String,
+    activeWorkers: Int,
+    displayedSpeed: Long,
+    displayedGraphSpeed: Long,
+    currentUploadSpeed: Long,
+    currentDownloadSpeed: Long,
+    displayedGraphPoints: List<Float>,
+    activeServerName: String,
+    jiggleRotation: Float,
+    jiggleTx: Float,
+    jiggleTy: Float,
+    haptic: androidx.compose.ui.hapticfeedback.HapticFeedback,
+    onUpdateWidgetOrder: (List<WidgetType>) -> Unit,
+    onDiagnosticsClick: () -> Unit,
+    onProtocolSelected: (String) -> Unit,
+    onPowerClick: () -> Unit
+) {
+    val gridState = rememberLazyGridState()
+    val density = LocalDensity.current
+    var previewWidgetList by remember(activeWidgetList) { mutableStateOf(activeWidgetList) }
+    var draggingWidget by remember { mutableStateOf<WidgetType?>(null) }
+    var draggingWidgetIndex by remember { mutableStateOf<Int?>(null) }
+    var dragVisualPosition by remember { mutableStateOf(Offset.Zero) }
+    var draggedWidgetSize by remember { mutableStateOf(IntSize.Zero) }
+    var awaitingDropTarget by remember { mutableStateOf(false) }
+    var dropAnimationTarget by remember { mutableStateOf<Offset?>(null) }
+    var pendingDropWidgetList by remember { mutableStateOf<List<WidgetType>?>(null) }
+    val isDropAnimating = dropAnimationTarget != null
+    val dragAnimationSpec = if (isDropAnimating) {
+        tween<Float>(durationMillis = 190, easing = FastOutSlowInEasing)
+    } else {
+        snap()
+    }
+    val dragTargetPosition = dropAnimationTarget ?: dragVisualPosition
+    val animatedDragX by animateFloatAsState(
+        targetValue = dragTargetPosition.x,
+        animationSpec = dragAnimationSpec,
+        label = "dragOverlayX"
+    )
+    val animatedDragY by animateFloatAsState(
+        targetValue = dragTargetPosition.y,
+        animationSpec = dragAnimationSpec,
+        label = "dragOverlayY"
+    )
+    val dragOverlayScale by animateFloatAsState(
+        targetValue = if (isDropAnimating) 1f else 1.06f,
+        animationSpec = tween(durationMillis = 190, easing = FastOutSlowInEasing),
+        label = "dragOverlayScale"
+    )
+
+    LaunchedEffect(activeWidgetList) {
+        if (draggingWidget == null && !awaitingDropTarget && dropAnimationTarget == null) previewWidgetList = activeWidgetList
+    }
+
+    LaunchedEffect(awaitingDropTarget, pendingDropWidgetList, draggingWidgetIndex) {
+        if (awaitingDropTarget && pendingDropWidgetList != null) {
+            withFrameNanos { }
+            dropAnimationTarget = draggingWidgetIndex?.let { index ->
+                gridState.layoutInfo.visibleItemsInfo
+                    .find { it.index == index }
+                    ?.offset
+                    ?.let { Offset(it.x.toFloat(), it.y.toFloat()) }
+            } ?: dragVisualPosition
+            awaitingDropTarget = false
+        }
+    }
+
+    LaunchedEffect(dropAnimationTarget, pendingDropWidgetList) {
+        val finalList = pendingDropWidgetList
+        if (dropAnimationTarget != null && finalList != null) {
+            delay(200)
+            if (finalList != activeWidgetList) {
+                onUpdateWidgetOrder(finalList)
+            }
+            draggingWidget = null
+            draggingWidgetIndex = null
+            dragVisualPosition = Offset.Zero
+            draggedWidgetSize = IntSize.Zero
+            awaitingDropTarget = false
+            dropAnimationTarget = null
+            pendingDropWidgetList = null
+            previewWidgetList = finalList
+        }
+    }
+
+    LaunchedEffect(isEditMode) {
+        if (!isEditMode) {
+            draggingWidget = null
+            draggingWidgetIndex = null
+            dragVisualPosition = Offset.Zero
+            draggedWidgetSize = IntSize.Zero
+            awaitingDropTarget = false
+            dropAnimationTarget = null
+            pendingDropWidgetList = null
+            previewWidgetList = activeWidgetList
+        }
+    }
+
+    @Composable
+    fun DashboardWidgetContent(widget: WidgetType, modifier: Modifier = Modifier) {
+        when (widget) {
+            WidgetType.NODE -> {
+                NodeDashboardCard(
+                    activeServerName = activeServerName,
+                    onDiagnosticsClick = onDiagnosticsClick,
+                    modifier = modifier.height(104.dp)
+                )
+            }
+            WidgetType.CONTROL -> {
+                ConnectControlWidget(
+                    protocol = protocol,
+                    tunnelRunning = tunnelRunning,
+                    cooldownSeconds = cooldownSeconds,
+                    onProtocolSelected = onProtocolSelected,
+                    onPowerClick = onPowerClick,
+                    modifier = modifier.height(334.dp)
+                )
+            }
+            WidgetType.GRAPH -> {
+                SpeedGraphCard(
+                    isRunning = tunnelRunning,
+                    currentSpeedBytes = displayedGraphSpeed,
+                    uploadSpeedBytes = currentUploadSpeed,
+                    downloadSpeedBytes = currentDownloadSpeed,
+                    points = displayedGraphPoints,
+                    modifier = modifier.height(160.dp)
+                )
+            }
+            else -> {
+                DashboardCard(title = widget.title, icon = widget.icon, modifier = modifier.height(130.dp)) {
+                    val value = when (widget) {
+                        WidgetType.PING -> if (tunnelRunning && currentPing > 0) "${currentPing} ms" else "--"
+                        WidgetType.SESSION -> if (tunnelRunning) timerString else "00:00:00"
+                        WidgetType.WORKERS -> "$activeWorkers"
+                        WidgetType.SPEED -> {
+                            val speedKb = displayedSpeed / 1024f
+                            if (tunnelRunning) {
+                                if (speedKb > 1024) String.format("%.1f MB/s", speedKb / 1024f) else String.format("%.0f KB/s", speedKb)
+                            } else {
+                                "0 KB/s"
+                            }
+                        }
+                    }
+                    AnimatedDashboardValue(value)
+                }
+            }
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxWidth()) {
+        LazyVerticalGrid(
+        state = gridState,
+        columns = GridCells.Fixed(2),
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(max = 1000.dp)
+            .pointerInput(isEditMode, activeWidgetList) {
+                if (!isEditMode) return@pointerInput
+                detectDragGesturesAfterLongPress(
+                    onDragStart = dragStart@{ offset ->
+                        if (dropAnimationTarget != null) return@dragStart
+                        val item = gridState.layoutInfo.visibleItemsInfo.find {
+                            offset.x >= it.offset.x && offset.x <= it.offset.x + it.size.width &&
+                                offset.y >= it.offset.y && offset.y <= it.offset.y + it.size.height
+                        }
+                        val draggableIndex = item?.index?.takeIf { index ->
+                            previewWidgetList.getOrNull(index)?.isUserWidget == true
+                        }
+                        draggingWidget = draggableIndex?.let { previewWidgetList[it] }
+                        draggingWidgetIndex = draggableIndex
+                        dragVisualPosition = item?.offset?.let { Offset(it.x.toFloat(), it.y.toFloat()) } ?: Offset.Zero
+                        draggedWidgetSize = item?.size ?: IntSize.Zero
+                        awaitingDropTarget = false
+                        dropAnimationTarget = null
+                        pendingDropWidgetList = null
+                        if (draggableIndex != null) haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    },
+                    onDrag = { change, dragAmount ->
+                        if (draggingWidgetIndex != null) {
+                            change.consume()
+                            dragVisualPosition += dragAmount
+                            val pointer = change.position
+                            val hoveredItem = gridState.layoutInfo.visibleItemsInfo.find {
+                                pointer.x >= it.offset.x && pointer.x <= it.offset.x + it.size.width &&
+                                    pointer.y >= it.offset.y && pointer.y <= it.offset.y + it.size.height
+                            }
+                            val insertionIndex = hoveredItem?.let { item ->
+                                val afterItemCenter = pointer.y > item.offset.y + item.size.height / 2f
+                                (item.index + if (afterItemCenter) 1 else 0).coerceIn(0, previewWidgetList.size)
+                            }
+                            val currentDraggingWidget = draggingWidget
+                            val from = currentDraggingWidget?.let { previewWidgetList.indexOf(it) } ?: -1
+                            if (
+                                currentDraggingWidget != null &&
+                                insertionIndex != null &&
+                                from in previewWidgetList.indices
+                            ) {
+                                val to = (if (insertionIndex > from) insertionIndex - 1 else insertionIndex).coerceIn(0, previewWidgetList.lastIndex)
+                                if (to != from) {
+                                    val list = previewWidgetList.toMutableList()
+                                    val moved = list.removeAt(from)
+                                    list.add(to, moved)
+                                    previewWidgetList = list
+                                    draggingWidgetIndex = to
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                }
+                            }
+                        }
+                    },
+                    onDragEnd = {
+                        if (draggingWidgetIndex != null) {
+                            pendingDropWidgetList = previewWidgetList
+                            awaitingDropTarget = true
+                        } else {
+                            if (previewWidgetList != activeWidgetList) {
+                                onUpdateWidgetOrder(previewWidgetList)
+                            }
+                            draggingWidget = null
+                            draggingWidgetIndex = null
+                            dragVisualPosition = Offset.Zero
+                            draggedWidgetSize = IntSize.Zero
+                            awaitingDropTarget = false
+                        }
+                    },
+                    onDragCancel = {
+                        draggingWidget = null
+                        draggingWidgetIndex = null
+                        dragVisualPosition = Offset.Zero
+                        draggedWidgetSize = IntSize.Zero
+                        awaitingDropTarget = false
+                        dropAnimationTarget = null
+                        pendingDropWidgetList = null
+                        previewWidgetList = activeWidgetList
+                    }
+                )
+            },
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        userScrollEnabled = false,
+        contentPadding = PaddingValues(bottom = 12.dp)
+    ) {
+        items(previewWidgetList, key = { it.name }, span = { if (it.isWide) GridItemSpan(maxLineSpan) else GridItemSpan(1) }) { widget ->
+            val index = previewWidgetList.indexOf(widget)
+            val isDragging = draggingWidgetIndex == index
+            val isDraggingAny = draggingWidget != null
+            val canEditWidget = widget.isUserWidget
+            val rotate = if (isEditMode && canEditWidget && !isDragging && !isDraggingAny) (if (index % 2 == 0) jiggleRotation else -jiggleRotation) else 0f
+            val tx = if (isEditMode && canEditWidget && !isDragging && !isDraggingAny) (if (index % 3 == 0) jiggleTx else -jiggleTx) else 0f
+            val ty = if (isEditMode && canEditWidget && !isDragging && !isDraggingAny) (if (index % 2 != 0) jiggleTy else -jiggleTy) else 0f
+
+            Box(
+                modifier = Modifier
+                    .animateItem(placementSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing))
+                    .graphicsLayer {
+                        alpha = if (isDragging) 0f else 1f
+                        rotationZ = rotate
+                        translationX = tx.dp.toPx()
+                        translationY = ty.dp.toPx()
+                    }
+            ) {
+                DashboardWidgetContent(widget)
+
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = isEditMode && canEditWidget,
+                    enter = scaleIn(spring(stiffness = Spring.StiffnessMediumLow)),
+                    exit = scaleOut(spring(stiffness = Spring.StiffnessMediumLow)),
+                    modifier = Modifier.align(Alignment.TopEnd).padding(12.dp)
+                ) {
+                    Surface(
+                        onClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onUpdateWidgetOrder(activeWidgetList - widget)
+                        },
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(Icons.Default.Remove, null, tint = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.size(20.dp))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+        draggingWidget?.let { widget ->
+            if (draggedWidgetSize != IntSize.Zero) {
+                val overlayWidth = with(density) { draggedWidgetSize.width.toDp() }
+                val overlayHeight = with(density) { draggedWidgetSize.height.toDp() }
+                Box(
+                    modifier = Modifier
+                        .offset {
+                            IntOffset(
+                                animatedDragX.roundToInt(),
+                                animatedDragY.roundToInt()
+                            )
+                        }
+                        .width(overlayWidth)
+                        .height(overlayHeight)
+                        .zIndex(50f)
+                        .graphicsLayer {
+                            scaleX = dragOverlayScale
+                            scaleY = dragOverlayScale
+                            shadowElevation = 30f
+                        }
+                ) {
+                    DashboardWidgetContent(widget)
+                }
+            }
+        }
+    }
+
+    androidx.compose.animation.AnimatedVisibility(
+        visible = isEditMode && availableWidgetList.isNotEmpty(),
+        enter = expandVertically(spring(stiffness = Spring.StiffnessMediumLow)) + fadeIn(),
+        exit = shrinkVertically(spring(stiffness = Spring.StiffnessMediumLow)) + fadeOut()
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 8.dp)) {
+            Text("Доступные виджеты", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 12.dp))
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(2),
+                modifier = Modifier.fillMaxWidth().heightIn(max = 400.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                userScrollEnabled = false,
+                contentPadding = PaddingValues(bottom = 12.dp)
+            ) {
+                items(availableWidgetList, key = { it.name }, span = { if (it.isWide) GridItemSpan(maxLineSpan) else GridItemSpan(1) }) { widget ->
+                    val index = availableWidgetList.indexOf(widget)
+                    val rotate = if (draggingWidget == null) (if (index % 2 == 0) -jiggleRotation else jiggleRotation) * 0.7f else 0f
+
+                    Box(modifier = Modifier.animateItem().graphicsLayer { rotationZ = rotate; alpha = 0.8f }) {
+                        Surface(modifier = Modifier.fillMaxWidth().height(if (widget.isWide) 80.dp else 130.dp), shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
+                            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(widget.icon, null, modifier = Modifier.size(28.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Spacer(Modifier.height(8.dp))
+                                Text(widget.title, style = MaterialTheme.typography.labelLarge)
+                            }
+                        }
+                        Surface(
+                            onClick = {
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                onUpdateWidgetOrder(activeWidgetList + widget)
+                            },
+                            shape = CircleShape,
+                            color = Color(0xFF4CAF50),
+                            modifier = Modifier.align(Alignment.TopEnd).padding(12.dp).size(32.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(Icons.Default.Add, null, tint = Color.White, modifier = Modifier.size(20.dp))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ПРЕМИУМ АНИМАЦИЯ: Мягкое дыхание вместо старых дерганых колец
@@ -739,6 +944,142 @@ private fun formatGraphSpeed(bytesPerSecond: Long): String {
         String.format("%.1f MB/s", kb / 1024f)
     } else {
         String.format("%.0f KB/s", kb)
+    }
+}
+
+@Composable
+fun ConnectControlWidget(
+    protocol: String,
+    tunnelRunning: Boolean,
+    cooldownSeconds: Int,
+    onProtocolSelected: (String) -> Unit,
+    onPowerClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val connectionStatusText = when {
+        tunnelRunning -> "Подключено"
+        cooldownSeconds > 4 -> "Подключение..."
+        cooldownSeconds > 2 -> "Проверка конфигурации..."
+        cooldownSeconds > 0 -> "Установка туннеля..."
+        else -> "Нажмите для старта"
+    }
+    val mainBtnInteractionSource = remember { MutableInteractionSource() }
+    val isMainBtnPressed by mainBtnInteractionSource.collectIsPressedAsState()
+    val buttonScale by animateFloatAsState(
+        targetValue = when {
+            isMainBtnPressed -> 0.88f
+            tunnelRunning -> 1.05f
+            else -> 1f
+        },
+        animationSpec = spring(dampingRatio = 0.5f, stiffness = Spring.StiffnessMediumLow),
+        label = "mainBtnScale"
+    )
+
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 18.dp), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+            FilterChip(
+                selected = protocol == "udp",
+                onClick = { onProtocolSelected("udp") },
+                label = { Text("UDP", fontWeight = FontWeight.Bold) },
+                enabled = !tunnelRunning
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            FilterChip(
+                selected = protocol == "tcp",
+                onClick = { onProtocolSelected("tcp") },
+                label = { Text("TCP", fontWeight = FontWeight.Bold) },
+                enabled = !tunnelRunning
+            )
+        }
+
+        Box(contentAlignment = Alignment.Center, modifier = Modifier.size(240.dp)) {
+            if (tunnelRunning || cooldownSeconds > 0) PremiumRadarWaves(tunnelRunning)
+
+            val circleColor by animateColorAsState(
+                targetValue = if (tunnelRunning) MaterialTheme.colorScheme.primary else if (cooldownSeconds > 0) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.surfaceVariant,
+                animationSpec = tween(500, easing = LinearOutSlowInEasing),
+                label = ""
+            )
+            val iconColor by animateColorAsState(
+                targetValue = if (tunnelRunning || cooldownSeconds > 0) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                label = ""
+            )
+
+            Surface(
+                modifier = Modifier
+                    .size(150.dp)
+                    .scale(buttonScale)
+                    .clip(CircleShape)
+                    .clickable(
+                        interactionSource = mainBtnInteractionSource,
+                        indication = null,
+                        enabled = cooldownSeconds == 0 || tunnelRunning
+                    ) {
+                        onPowerClick()
+                    },
+                shape = CircleShape,
+                color = circleColor,
+                shadowElevation = if (tunnelRunning) 24.dp else 8.dp
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    if (cooldownSeconds > 0 && !tunnelRunning) {
+                        CircularProgressIndicator(color = iconColor, modifier = Modifier.size(70.dp), strokeWidth = 6.dp, strokeCap = StrokeCap.Round)
+                    } else {
+                        Icon(if (tunnelRunning) Icons.Default.Shield else Icons.Default.PowerSettingsNew, null, modifier = Modifier.size(68.dp), tint = iconColor)
+                    }
+                }
+            }
+        }
+
+        AnimatedContent(
+            targetState = connectionStatusText,
+            transitionSpec = { slideInVertically { it / 2 } + fadeIn(tween(300)) togetherWith slideOutVertically { -it / 2 } + fadeOut(tween(300)) },
+            label = "statusText"
+        ) { text ->
+            Text(
+                text,
+                style = MaterialTheme.typography.titleMedium,
+                color = if (tunnelRunning) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(top = 12.dp, bottom = 16.dp)
+            )
+        }
+    }
+}
+
+@Composable
+fun NodeDashboardCard(activeServerName: String, onDiagnosticsClick: () -> Unit, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(28.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+        tonalElevation = 2.dp
+    ) {
+        Row(modifier = Modifier.padding(horizontal = 20.dp, vertical = 18.dp), verticalAlignment = Alignment.CenterVertically) {
+            Surface(modifier = Modifier.size(52.dp), shape = CircleShape, color = MaterialTheme.colorScheme.primary) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(Icons.Default.Dns, null, tint = MaterialTheme.colorScheme.onPrimary)
+                }
+            }
+            Spacer(modifier = Modifier.width(16.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Текущая нода", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    activeServerName,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            IconButton(onClick = onDiagnosticsClick) {
+                Icon(Icons.Default.HealthAndSafety, null, tint = MaterialTheme.colorScheme.primary)
+            }
+        }
     }
 }
 

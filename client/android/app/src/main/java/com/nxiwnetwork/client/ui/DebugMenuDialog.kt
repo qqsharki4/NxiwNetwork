@@ -290,7 +290,7 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                         scope.launch { settingsStore.saveGraphSpeedMetricMode(mode.id) }
                     }
-                    WidgetType.entries.forEach { widget ->
+                    WidgetType.entries.filter { it.isUserWidget }.forEach { widget ->
                         DebugSwitchRow(widget.title, "Показывать виджет на главном экране.", dashboardWidgets.contains(widget)) { enabled ->
                             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                             setDashboardWidget(widget, enabled)
