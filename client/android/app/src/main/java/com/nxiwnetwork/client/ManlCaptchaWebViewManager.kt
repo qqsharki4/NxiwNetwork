@@ -130,15 +130,22 @@ object ManlCaptchaWebViewManager {
                 body, html, .vkc__ModalCard-module__host, .vkc__AppRoot-module__host, .vkui__root {
                     background: transparent !important;
                     box-shadow: none !important;
+                    color-scheme: dark !important;
                 }
                 
                 .vkc__ModalCardBase-module__container {
                     background: #000000 !important;
                     box-shadow: none !important;
                 }
+                .vkc__ModalCardBase-module__container,
+                .vkc__ModalCardBase-module__container * {
+                    color: #ffffff !important;
+                    -webkit-text-fill-color: #ffffff !important;
+                }
 
                 .vkc__ModalCardBase-module__dismiss {
                     color: #ef4444 !important;
+                    -webkit-text-fill-color: #ef4444 !important;
                     transform: scale(0.8) translateX(-12px) !important;
                 }
                 .vkc__ModalCardBase-module__dismiss svg {
@@ -148,6 +155,7 @@ object ManlCaptchaWebViewManager {
                 .vkc__RefreshButton-module__text,
                 .vkc__SliderCaptcha-module__description {
                     color: #ffffff !important;
+                    -webkit-text-fill-color: #ffffff !important;
                 }
 
                 .vkc__SwipeButton-module__track {
@@ -156,6 +164,7 @@ object ManlCaptchaWebViewManager {
 
                 .vkc__SwipeButton-module__track span {
                     color: #0000FF !important;
+                    -webkit-text-fill-color: #0000FF !important;
                 }
             `;
             document.head.appendChild(style);
@@ -564,6 +573,7 @@ class ManlCaptchaActivity : ComponentActivity() {
                 body, html, .vkc__ModalCard-module__host, .vkc__AppRoot-module__host, .vkui__root {
                     background: transparent !important;
                     box-shadow: none !important;
+                    color-scheme: dark !important;
                 }
                 
                 /* Сама карточка (окно) - фон чёрный */
@@ -571,10 +581,16 @@ class ManlCaptchaActivity : ComponentActivity() {
                     background: #000000 !important;
                     box-shadow: none !important;
                 }
+                .vkc__ModalCardBase-module__container,
+                .vkc__ModalCardBase-module__container * {
+                    color: #ffffff !important;
+                    -webkit-text-fill-color: #ffffff !important;
+                }
 
                 /* Стилизуем крестик ВК: левее, меньше, красный */
                 .vkc__ModalCardBase-module__dismiss {
                     color: #ef4444 !important;
+                    -webkit-text-fill-color: #ef4444 !important;
                     transform: scale(0.8) translateX(-12px) !important;
                 }
                 .vkc__ModalCardBase-module__dismiss svg {
@@ -585,6 +601,7 @@ class ManlCaptchaActivity : ComponentActivity() {
                 .vkc__RefreshButton-module__text,
                 .vkc__SliderCaptcha-module__description {
                     color: #ffffff !important;
+                    -webkit-text-fill-color: #ffffff !important;
                 }
 
                 /* Поле (трек), где нужно потянуть вправо - делаем белым */
@@ -595,6 +612,7 @@ class ManlCaptchaActivity : ComponentActivity() {
                 /* Текст "Потяните вправо" внутри трека - делаем синим */
                 .vkc__SwipeButton-module__track span {
                     color: #0000FF !important;
+                    -webkit-text-fill-color: #0000FF !important;
                 }
             `;
             document.head.appendChild(style);
