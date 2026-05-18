@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
+import android.provider.Settings as AndroidSettings
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
@@ -48,6 +49,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.nxiwnetwork.client.AvailableUpdate
 import com.nxiwnetwork.client.CoreBackend
 import com.nxiwnetwork.client.ReleaseUpdater
@@ -995,7 +999,7 @@ fun NetworkSettings(onBack: () -> Unit) {
                     }
                 }
             }
-            Divider(modifier = Modifier.padding(vertical = 16.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+            HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text("Размер пакета (MTU)", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                 AnimatedContent(
@@ -1090,6 +1094,7 @@ fun PerformanceSettings(onBack: () -> Unit) {
     val settingsStore = remember { SettingsStore(context) }
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
+    val lifecycleOwner = LocalLifecycleOwner.current
 
     val workersCount by settingsStore.workersPerHash.collectAsStateWithLifecycle(12)
     val captchaMethodOrNull by remember(settingsStore) {
@@ -1101,10 +1106,15 @@ fun PerformanceSettings(onBack: () -> Unit) {
     val wifiHighPerformance by settingsStore.wifiHighPerformance.collectAsStateWithLifecycle(true)
     val keepaliveSeconds by settingsStore.clientKeepaliveSeconds.collectAsStateWithLifecycle(10)
     val coreBackendOrNull by settingsStore.coreBackend.collectAsStateWithLifecycle(null)
+    val manualCaptchaOverlay by settingsStore.manualCaptchaOverlay.collectAsStateWithLifecycle(false)
     val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
     val activeCoreBackend by TunnelManager.activeCoreBackend.collectAsStateWithLifecycle()
     val captchaMethod = captchaMethodOrNull ?: "manual"
     val coreBackend = CoreBackend.fromId(coreBackendOrNull)
+    var overlayPermissionRefresh by remember { mutableIntStateOf(0) }
+    val overlayPermissionGranted = remember(overlayPermissionRefresh) {
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.M || AndroidSettings.canDrawOverlays(context)
+    }
 
     var nextHashFieldId by remember { mutableLongStateOf(1L) }
     var hashFields by remember { mutableStateOf(listOf(VkHashFieldUi(id = 0L, value = ""))) }
@@ -1174,6 +1184,30 @@ fun PerformanceSettings(onBack: () -> Unit) {
     var animateKeepaliveValue by remember { mutableStateOf(false) }
     var animateCaptchaSelection by remember { mutableStateOf(false) }
     var animateCoreBackendSelection by remember { mutableStateOf(false) }
+
+    fun openOverlayPermissionSettings() {
+        overlayPermissionRefresh++
+        runCatching {
+            context.startActivity(
+                Intent(
+                    AndroidSettings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:${context.packageName}")
+                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        }.onFailure {
+            Toast.makeText(context, "Не удалось открыть настройки overlay-разрешения", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                overlayPermissionRefresh++
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         SettingsHeader("Производительность", onBack)
@@ -1372,6 +1406,54 @@ fun PerformanceSettings(onBack: () -> Unit) {
                                 scope.launch { settingsStore.saveCaptchaMode(captchaModeForMethod(v)); settingsStore.saveCaptchaSolveMethod(v) }
                             }
                         ) { Text(l, fontSize = 14.sp) }
+                    }
+                }
+            }
+            HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f).padding(end = 16.dp)) {
+                    Text("Окно поверх приложений", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Text(
+                        "Ручная WebView-капча откроется отдельным окном, даже если приложение свернуто.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 14.sp
+                    )
+                }
+                Switch(
+                    checked = manualCaptchaOverlay,
+                    onCheckedChange = { enabled ->
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        scope.launch { settingsStore.saveManualCaptchaOverlay(enabled) }
+                        if (enabled && !overlayPermissionGranted) {
+                            openOverlayPermissionSettings()
+                        }
+                    }
+                )
+            }
+            AnimatedVisibility(
+                visible = manualCaptchaOverlay && !overlayPermissionGranted,
+                enter = fadeIn(tween(140)) + expandVertically(tween(180, easing = FastOutSlowInEasing)),
+                exit = fadeOut(tween(100)) + shrinkVertically(tween(160, easing = FastOutSlowInEasing))
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.WarningAmber, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "Нужно разрешение Android «поверх других окон». Без него капча откроется старым способом.",
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 13.sp
+                    )
+                    TextButton(onClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        openOverlayPermissionSettings()
+                    }) {
+                        Text("Открыть")
                     }
                 }
             }
