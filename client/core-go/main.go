@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -26,6 +25,8 @@ var (
 // Формат: "token:<success_token>" или "error:<message>"
 var CaptchaResultCh = make(chan string, 1)
 
+const maxRuntimeWorkers = 72
+
 // drainCaptchaResult удаляет устаревший результат капчи из канала (если остался)
 func drainCaptchaResult() {
 	select {
@@ -37,6 +38,32 @@ func drainCaptchaResult() {
 func init() {
 	vkAppID.Store("6287487")
 	vkAppSecret.Store("QbYic1K3lEV5kTGiqlq2")
+}
+
+func parseWorkerResizeCommand(line string) (int, bool) {
+	fields := strings.FieldsFunc(strings.TrimSpace(line), func(r rune) bool {
+		return r == '|' || r == '=' || r == ':' || r == ' ' || r == '\t'
+	})
+	if len(fields) < 2 {
+		return 0, false
+	}
+	cmd := strings.ToUpper(strings.TrimSpace(fields[0]))
+	switch cmd {
+	case "SET_WORKERS", "WORKERS", "WORKER_COUNT", "RESIZE_WORKERS":
+	default:
+		return 0, false
+	}
+	var value int
+	if _, err := fmt.Sscanf(fields[1], "%d", &value); err != nil {
+		return 0, false
+	}
+	if value < 1 {
+		value = 1
+	}
+	if value > maxRuntimeWorkers {
+		value = maxRuntimeWorkers
+	}
+	return value, true
 }
 
 func main() {
@@ -65,6 +92,7 @@ func main() {
 	}()
 
 	var pauseFlag int32 // 0 = активен, 1 = пауза (Doze-mode)
+	resizeWorkersCh := make(chan int, 4)
 
 	// STDIN для PAUSE/RESUME/STOP (Doze-mode) и CAPTCHA_RESULT (WebView mode)
 	go func() {
@@ -90,6 +118,15 @@ func main() {
 				// Гарантированная запись нового результата
 				CaptchaResultCh <- result
 				log.Printf("[КАПЧА] Результат от Kotlin записан в канал")
+			default:
+				if workers, ok := parseWorkerResizeCommand(line); ok {
+					select {
+					case resizeWorkersCh <- workers:
+						log.Printf("[CONTROL] Запрошено изменение воркеров: %d", workers)
+					default:
+						log.Printf("[CONTROL] Пропускаю SET_WORKERS=%d: предыдущая команда ещё обрабатывается", workers)
+					}
+				}
 			}
 		}
 	}()
@@ -145,9 +182,8 @@ func main() {
 	}
 
 	// Лимит воркеров
-	maxWorkers := 72
-	if *numW > maxWorkers {
-		*numW = maxWorkers
+	if *numW > maxRuntimeWorkers {
+		*numW = maxRuntimeWorkers
 	}
 	if *numW < 1 {
 		*numW = 1
@@ -185,7 +221,7 @@ func main() {
 		localPort = "9000"
 	}
 
-	numGroups := (*numW + workersPerGroup - 1) / workersPerGroup
+	numGroups := groupCountForWorkers(*numW)
 
 	log.Println("[КЛИЕНТ] ═══════════════════════════════════════")
 	log.Printf("[КЛИЕНТ] VK App: %s", *appID)
@@ -252,54 +288,171 @@ func main() {
 		}
 	}()
 
-	var wg sync.WaitGroup
-	workerIDCounter := 1
-
-	var prevWaitReady <-chan struct{}
-
-	for g := 0; g < numGroups; g++ {
-		isFirst := (g == 0)
-
-		var myWaitReady <-chan struct{}
-		var mySignalReady chan<- struct{}
-
-		if g > 0 {
-			myWaitReady = prevWaitReady
-		}
-		if g < numGroups-1 {
-			ch := make(chan struct{})
-			mySignalReady = ch
-			prevWaitReady = ch
-		}
-
-		remainingWorkers := *numW - (g * workersPerGroup)
-		groupSize := remainingWorkers
-		if groupSize > workersPerGroup {
-			groupSize = workersPerGroup
-		}
-		ids := make([]int, groupSize)
-		for i := range ids {
-			ids[i] = workerIDCounter
-			workerIDCounter++
-		}
-
-		gID := g + 1
-		cycle := time.Duration(defaultCycleSecs) * time.Second
-		var cc chan<- string
-		if isFirst {
-			cc = configCh
-		}
-
-		wg.Add(1)
-		go func(groupID int, cycleDir time.Duration, isFirstGroup bool, configChan chan<- string, workerIds []int, startHashIndex int, waitR <-chan struct{}, sigR chan<- struct{}) {
-			defer wg.Done()
-			WorkerGroup(ctx, groupID, startHashIndex, tp, peer, disp, localPort, *useUDP,
-				isFirstGroup, configChan, workerIds, cycleDir, &pauseFlag, *deviceID, *connPassword, keepaliveInterval, stats, waitR, sigR)
-		}(gID, cycle, isFirst, cc, ids, g, myWaitReady, mySignalReady)
+	supervisor := workerSupervisor{
+		tp:                tp,
+		peer:              peer,
+		dispatcher:        disp,
+		localPort:         localPort,
+		useUDP:            *useUDP,
+		configCh:          configCh,
+		pauseFlag:         &pauseFlag,
+		deviceID:          *deviceID,
+		password:          *connPassword,
+		keepaliveInterval: keepaliveInterval,
+		stats:             stats,
 	}
-
-	wg.Wait()
-	close(configCh)
+	supervisor.Run(ctx, *numW, resizeWorkersCh)
 	<-configDone
 	log.Println("[КЛИЕНТ] Все воркеры завершены")
+}
+
+type workerSupervisor struct {
+	tp                *TurnParams
+	peer              *net.UDPAddr
+	dispatcher        *Dispatcher
+	localPort         string
+	useUDP            bool
+	configCh          chan<- string
+	pauseFlag         *int32
+	deviceID          string
+	password          string
+	keepaliveInterval time.Duration
+	stats             *Stats
+	nextWorkerID      int
+}
+
+type workerGroupHandle struct {
+	groupID int
+	size    int
+	cancel  context.CancelFunc
+	done    chan struct{}
+}
+
+func groupCountForWorkers(workers int) int {
+	if workers < 1 {
+		workers = 1
+	}
+	return (workers + workersPerGroup - 1) / workersPerGroup
+}
+
+func groupSizeForWorkers(totalWorkers, groupID int) int {
+	if totalWorkers < 1 || groupID < 1 {
+		return 0
+	}
+	start := (groupID - 1) * workersPerGroup
+	if start >= totalWorkers {
+		return 0
+	}
+	size := totalWorkers - start
+	if size > workersPerGroup {
+		size = workersPerGroup
+	}
+	return size
+}
+
+func (s *workerSupervisor) nextWorkerIDs(count int) []int {
+	if s.nextWorkerID <= 0 {
+		s.nextWorkerID = 1
+	}
+	ids := make([]int, count)
+	for i := range ids {
+		ids[i] = s.nextWorkerID
+		s.nextWorkerID++
+	}
+	return ids
+}
+
+func (s *workerSupervisor) Run(ctx context.Context, initialWorkers int, resizeCh <-chan int) {
+	handles := make(map[int]*workerGroupHandle)
+	currentWorkers := initialWorkers
+	s.reconcile(ctx, handles, currentWorkers)
+	defer s.stopAll(handles)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case requested := <-resizeCh:
+			if requested < 1 {
+				requested = 1
+			}
+			if requested > maxRuntimeWorkers {
+				requested = maxRuntimeWorkers
+			}
+			if requested == currentWorkers {
+				log.Printf("[CONTROL] Воркеров уже %d, изменений нет", requested)
+				continue
+			}
+			log.Printf("[CONTROL] Runtime resize воркеров: %d → %d", currentWorkers, requested)
+			currentWorkers = requested
+			s.reconcile(ctx, handles, currentWorkers)
+		}
+	}
+}
+
+func (s *workerSupervisor) reconcile(ctx context.Context, handles map[int]*workerGroupHandle, targetWorkers int) {
+	targetGroups := groupCountForWorkers(targetWorkers)
+	for groupID, handle := range handles {
+		if groupID > targetGroups {
+			log.Printf("[CONTROL] Останавливаю группу #%d (%d воркеров)", groupID, handle.size)
+			s.stopGroup(handle)
+			delete(handles, groupID)
+		}
+	}
+	for groupID := 1; groupID <= targetGroups; groupID++ {
+		targetSize := groupSizeForWorkers(targetWorkers, groupID)
+		if targetSize <= 0 {
+			continue
+		}
+		if handle, ok := handles[groupID]; ok {
+			if handle.size == targetSize {
+				continue
+			}
+			log.Printf("[CONTROL] Пересобираю группу #%d: %d → %d воркеров", groupID, handle.size, targetSize)
+			s.stopGroup(handle)
+			delete(handles, groupID)
+		}
+		handles[groupID] = s.startGroup(ctx, groupID, targetSize)
+	}
+}
+
+func (s *workerSupervisor) startGroup(ctx context.Context, groupID, size int) *workerGroupHandle {
+	groupCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	workerIDs := s.nextWorkerIDs(size)
+	getConfig := groupID == 1
+	var configCh chan<- string
+	if getConfig {
+		configCh = s.configCh
+	}
+	log.Printf("[CONTROL] Запускаю группу #%d: %d воркеров", groupID, size)
+	go func() {
+		defer close(done)
+		WorkerGroup(groupCtx, groupID, groupID-1, s.tp, s.peer, s.dispatcher, s.localPort, s.useUDP,
+			getConfig, configCh, workerIDs, time.Duration(defaultCycleSecs)*time.Second, s.pauseFlag,
+			s.deviceID, s.password, s.keepaliveInterval, s.stats, nil, nil)
+	}()
+	return &workerGroupHandle{
+		groupID: groupID,
+		size:    size,
+		cancel:  cancel,
+		done:    done,
+	}
+}
+
+func (s *workerSupervisor) stopGroup(handle *workerGroupHandle) {
+	handle.cancel()
+	select {
+	case <-handle.done:
+	case <-time.After(10 * time.Second):
+		log.Printf("[CONTROL] Группа #%d ещё завершается, продолжаю без ожидания", handle.groupID)
+	}
+}
+
+func (s *workerSupervisor) stopAll(handles map[int]*workerGroupHandle) {
+	for groupID, handle := range handles {
+		log.Printf("[CONTROL] Останавливаю группу #%d", groupID)
+		s.stopGroup(handle)
+		delete(handles, groupID)
+	}
 }

@@ -4,7 +4,7 @@ use base64::Engine;
 use bytes::Bytes;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
@@ -33,6 +33,7 @@ const DEFAULT_VK_APP_SECRET: &str = "QbYic1K3lEV5kTGiqlq2";
 const OK_APP_KEY: &str = "CGMMEJLGDIHBABABA";
 const WORKER_SEND_BUF: usize = 128;
 const WORKERS_PER_GROUP: usize = 12;
+const MAX_RUNTIME_WORKERS: usize = 72;
 const MAX_CREDS_RETRIES: usize = 5;
 const RETURN_BUF: usize = 384;
 const READ_BUF_SIZE: usize = 2000;
@@ -164,11 +165,13 @@ async fn run() -> Result<()> {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (pause_tx, pause_rx) = watch::channel(false);
+    let (worker_target_tx, worker_target_rx) = watch::channel(args.workers);
     let (captcha_tx, _) = broadcast::channel(8);
     tokio::spawn(stdin_loop(
         captcha_tx.clone(),
         shutdown_tx.clone(),
         pause_tx.clone(),
+        worker_target_tx,
     ));
 
     let stats = Arc::new(Stats::default());
@@ -214,57 +217,26 @@ async fn run() -> Result<()> {
         sni: args.sni.clone(),
     });
     let auth_gate = Arc::new(Mutex::new(()));
-    let group_count = args.workers.div_ceil(WORKERS_PER_GROUP);
-    let mut handles = Vec::with_capacity(group_count);
-    let mut next_worker_id = 1usize;
-    let mut previous_ready_rx: Option<watch::Receiver<bool>> = None;
-
-    for group_index in 0..group_count {
-        let group_id = group_index + 1;
-        let remaining = args.workers - group_index * WORKERS_PER_GROUP;
-        let group_size = remaining.min(WORKERS_PER_GROUP);
-        let mut worker_ids = Vec::with_capacity(group_size);
-        for _ in 0..group_size {
-            worker_ids.push(next_worker_id);
-            next_worker_id += 1;
-        }
-
-        let (ready_tx, ready_rx) = watch::channel(false);
-        let signal_ready = if group_index + 1 < group_count {
-            Some(ready_tx)
-        } else {
-            None
-        };
-        let wait_ready = previous_ready_rx.take();
-        previous_ready_rx = Some(ready_rx);
-
-        handles.push(tokio::spawn(group_loop(
-            group_id,
-            group_index,
-            worker_ids,
-            group_index == 0,
-            peer,
-            local_port.clone(),
-            args.clone(),
-            params.clone(),
-            dispatcher.clone(),
-            config_tx.clone(),
-            config_sent.clone(),
-            stats.clone(),
-            captcha_tx.clone(),
-            auth_gate.clone(),
-            shutdown_rx.clone(),
-            pause_rx.clone(),
-            wait_ready,
-            signal_ready,
-        )));
-    }
+    let supervisor_handle = tokio::spawn(worker_supervisor(
+        args.workers,
+        worker_target_rx,
+        peer,
+        local_port.clone(),
+        args.clone(),
+        params.clone(),
+        dispatcher.clone(),
+        config_tx.clone(),
+        config_sent.clone(),
+        stats.clone(),
+        captcha_tx.clone(),
+        auth_gate.clone(),
+        shutdown_rx.clone(),
+        pause_rx.clone(),
+    ));
     drop(config_tx);
 
     wait_for_shutdown(shutdown_rx).await;
-    for handle in handles {
-        let _ = handle.await;
-    }
+    let _ = supervisor_handle.await;
     println!("[КЛИЕНТ] Все воркеры завершены");
     Ok(())
 }
@@ -414,6 +386,7 @@ async fn stdin_loop(
     captcha_tx: broadcast::Sender<String>,
     shutdown_tx: watch::Sender<bool>,
     pause_tx: watch::Sender<bool>,
+    worker_target_tx: watch::Sender<usize>,
 ) {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Ok(Some(line)) = lines.next_line().await {
@@ -435,8 +408,26 @@ async fn stdin_loop(
         }
         if let Some(result) = trimmed.strip_prefix("CAPTCHA_RESULT|") {
             let _ = captcha_tx.send(result.to_string());
+            continue;
+        }
+        if let Some(workers) = parse_worker_resize_command(&trimmed) {
+            let _ = worker_target_tx.send(workers);
+            println!("[CONTROL] Запрошено изменение воркеров: {workers}");
         }
     }
+}
+
+fn parse_worker_resize_command(line: &str) -> Option<usize> {
+    let mut parts = line
+        .split(|ch: char| matches!(ch, '|' | '=' | ':' | ' ' | '\t'))
+        .filter(|part| !part.trim().is_empty());
+    let command = parts.next()?.trim().to_ascii_uppercase();
+    match command.as_str() {
+        "SET_WORKERS" | "WORKERS" | "WORKER_COUNT" | "RESIZE_WORKERS" => {}
+        _ => return None,
+    }
+    let workers = parts.next()?.trim().parse::<usize>().ok()?;
+    Some(workers.clamp(1, MAX_RUNTIME_WORKERS))
 }
 
 async fn stats_loop(stats: Arc<Stats>, mut shutdown_rx: watch::Receiver<bool>) {
@@ -666,6 +657,259 @@ impl Dispatcher {
                     }
                 }
             }
+        }
+    }
+}
+
+struct GroupHandle {
+    group_id: usize,
+    size: usize,
+    shutdown_tx: watch::Sender<bool>,
+    handle: JoinHandle<()>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn worker_supervisor(
+    initial_workers: usize,
+    mut worker_target_rx: watch::Receiver<usize>,
+    peer: SocketAddr,
+    local_port: String,
+    args: CoreArgs,
+    params: Arc<TurnParams>,
+    dispatcher: Arc<Dispatcher>,
+    config_tx: mpsc::Sender<String>,
+    config_sent: Arc<AtomicBool>,
+    stats: Arc<Stats>,
+    captcha_tx: broadcast::Sender<String>,
+    auth_gate: Arc<Mutex<()>>,
+    mut shutdown_rx: watch::Receiver<bool>,
+    pause_rx: watch::Receiver<bool>,
+) {
+    let mut handles: HashMap<usize, GroupHandle> = HashMap::new();
+    let mut next_worker_id = 1usize;
+    let mut current_workers = initial_workers.clamp(1, MAX_RUNTIME_WORKERS);
+    reconcile_worker_groups(
+        &mut handles,
+        &mut next_worker_id,
+        current_workers,
+        peer,
+        &local_port,
+        &args,
+        params.clone(),
+        dispatcher.clone(),
+        config_tx.clone(),
+        config_sent.clone(),
+        stats.clone(),
+        captcha_tx.clone(),
+        auth_gate.clone(),
+        pause_rx.clone(),
+    )
+    .await;
+
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    stop_all_groups(&mut handles).await;
+                    return;
+                }
+            }
+            changed = worker_target_rx.changed() => {
+                if changed.is_err() {
+                    continue;
+                }
+                let requested = (*worker_target_rx.borrow()).clamp(1, MAX_RUNTIME_WORKERS);
+                if requested == current_workers {
+                    println!("[CONTROL] Воркеров уже {requested}, изменений нет");
+                    continue;
+                }
+                println!("[CONTROL] Runtime resize воркеров: {current_workers} → {requested}");
+                current_workers = requested;
+                reconcile_worker_groups(
+                    &mut handles,
+                    &mut next_worker_id,
+                    current_workers,
+                    peer,
+                    &local_port,
+                    &args,
+                    params.clone(),
+                    dispatcher.clone(),
+                    config_tx.clone(),
+                    config_sent.clone(),
+                    stats.clone(),
+                    captcha_tx.clone(),
+                    auth_gate.clone(),
+                    pause_rx.clone(),
+                )
+                .await;
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn reconcile_worker_groups(
+    handles: &mut HashMap<usize, GroupHandle>,
+    next_worker_id: &mut usize,
+    target_workers: usize,
+    peer: SocketAddr,
+    local_port: &str,
+    args: &CoreArgs,
+    params: Arc<TurnParams>,
+    dispatcher: Arc<Dispatcher>,
+    config_tx: mpsc::Sender<String>,
+    config_sent: Arc<AtomicBool>,
+    stats: Arc<Stats>,
+    captcha_tx: broadcast::Sender<String>,
+    auth_gate: Arc<Mutex<()>>,
+    pause_rx: watch::Receiver<bool>,
+) {
+    let target_groups = group_count_for_workers(target_workers);
+    let stale_groups: Vec<usize> = handles
+        .keys()
+        .copied()
+        .filter(|group_id| *group_id > target_groups)
+        .collect();
+    for group_id in stale_groups {
+        if let Some(handle) = handles.remove(&group_id) {
+            println!(
+                "[CONTROL] Останавливаю группу #{} ({} воркеров)",
+                handle.group_id, handle.size
+            );
+            stop_group(handle).await;
+        }
+    }
+
+    for group_id in 1..=target_groups {
+        let target_size = group_size_for_workers(target_workers, group_id);
+        if target_size == 0 {
+            continue;
+        }
+        let should_restart = handles
+            .get(&group_id)
+            .map(|handle| handle.size != target_size)
+            .unwrap_or(false);
+        if should_restart {
+            if let Some(handle) = handles.remove(&group_id) {
+                println!(
+                    "[CONTROL] Пересобираю группу #{}: {} → {} воркеров",
+                    group_id, handle.size, target_size
+                );
+                stop_group(handle).await;
+            }
+        }
+        if !handles.contains_key(&group_id) {
+            let handle = start_group(
+                group_id,
+                target_size,
+                next_worker_id,
+                peer,
+                local_port,
+                args,
+                params.clone(),
+                dispatcher.clone(),
+                config_tx.clone(),
+                config_sent.clone(),
+                stats.clone(),
+                captcha_tx.clone(),
+                auth_gate.clone(),
+                pause_rx.clone(),
+            );
+            handles.insert(group_id, handle);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_group(
+    group_id: usize,
+    size: usize,
+    next_worker_id: &mut usize,
+    peer: SocketAddr,
+    local_port: &str,
+    args: &CoreArgs,
+    params: Arc<TurnParams>,
+    dispatcher: Arc<Dispatcher>,
+    config_tx: mpsc::Sender<String>,
+    config_sent: Arc<AtomicBool>,
+    stats: Arc<Stats>,
+    captcha_tx: broadcast::Sender<String>,
+    auth_gate: Arc<Mutex<()>>,
+    pause_rx: watch::Receiver<bool>,
+) -> GroupHandle {
+    let mut worker_ids = Vec::with_capacity(size);
+    for _ in 0..size {
+        worker_ids.push(*next_worker_id);
+        *next_worker_id += 1;
+    }
+    let (group_shutdown_tx, group_shutdown_rx) = watch::channel(false);
+    let group_args = args.clone();
+    println!("[CONTROL] Запускаю группу #{group_id}: {size} воркеров");
+    let handle = tokio::spawn(group_loop(
+        group_id,
+        group_id - 1,
+        worker_ids,
+        group_id == 1,
+        peer,
+        local_port.to_string(),
+        group_args,
+        params,
+        dispatcher,
+        config_tx,
+        config_sent,
+        stats,
+        captcha_tx,
+        auth_gate,
+        group_shutdown_rx,
+        pause_rx,
+        None,
+        None,
+    ));
+    GroupHandle {
+        group_id,
+        size,
+        shutdown_tx: group_shutdown_tx,
+        handle,
+    }
+}
+
+fn group_count_for_workers(workers: usize) -> usize {
+    workers
+        .clamp(1, MAX_RUNTIME_WORKERS)
+        .div_ceil(WORKERS_PER_GROUP)
+}
+
+fn group_size_for_workers(total_workers: usize, group_id: usize) -> usize {
+    if group_id == 0 {
+        return 0;
+    }
+    let total_workers = total_workers.clamp(1, MAX_RUNTIME_WORKERS);
+    let start = (group_id - 1) * WORKERS_PER_GROUP;
+    if start >= total_workers {
+        return 0;
+    }
+    (total_workers - start).min(WORKERS_PER_GROUP)
+}
+
+async fn stop_group(handle: GroupHandle) {
+    let _ = handle.shutdown_tx.send(true);
+    if time::timeout(Duration::from_secs(10), handle.handle)
+        .await
+        .is_err()
+    {
+        println!(
+            "[CONTROL] Группа #{} ещё завершается, продолжаю без ожидания",
+            handle.group_id
+        );
+    }
+}
+
+async fn stop_all_groups(handles: &mut HashMap<usize, GroupHandle>) {
+    let group_ids: Vec<usize> = handles.keys().copied().collect();
+    for group_id in group_ids {
+        if let Some(handle) = handles.remove(&group_id) {
+            println!("[CONTROL] Останавливаю группу #{group_id}");
+            stop_group(handle).await;
         }
     }
 }
