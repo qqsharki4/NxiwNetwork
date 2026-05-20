@@ -77,6 +77,7 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
     val speedMetricModeRaw by settingsStore.speedMetricMode.collectAsStateWithLifecycle(SettingsStore.DEFAULT_SPEED_METRIC_MODE)
     val graphSpeedMetricModeRaw by settingsStore.graphSpeedMetricMode.collectAsStateWithLifecycle(SettingsStore.DEFAULT_SPEED_METRIC_MODE)
     val manualCaptchaOverlay by settingsStore.manualCaptchaOverlay.collectAsStateWithLifecycle(false)
+    val disableRuntimeWorkerApply by settingsStore.disableRuntimeWorkerApply.collectAsStateWithLifecycle(false)
     val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
     val activeBackend by TunnelManager.activeCoreBackend.collectAsStateWithLifecycle()
     val activeWorkers by TunnelManager.activeWorkers.collectAsStateWithLifecycle()
@@ -155,6 +156,7 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
         speedMetricModeRaw,
         graphSpeedMetricModeRaw,
         manualCaptchaOverlay,
+        disableRuntimeWorkerApply,
         overlayPermissionGranted,
         diagnostics
     ) {
@@ -190,6 +192,7 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
             speedMetricMode = speedMetricMode,
             graphSpeedMetricMode = graphSpeedMetricMode,
             manualCaptchaOverlay = manualCaptchaOverlay,
+            disableRuntimeWorkerApply = disableRuntimeWorkerApply,
             overlayPermissionGranted = overlayPermissionGranted,
             diagnostics = diagnostics
         )
@@ -352,6 +355,10 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
                     }
 
                     DebugSectionTitle("Devtools")
+                    DebugSwitchRow("Не делать авто применение в рантайме", "Если включено, слайдер потоков сохраняет настройку, но не отправляет SET_WORKERS в работающее ядро.", disableRuntimeWorkerApply) { enabled ->
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        scope.launch { settingsStore.saveDisableRuntimeWorkerApply(enabled) }
+                    }
                     DebugWavyProgressPreview()
                     DebugMaterial3ExpressivePreview()
                     DebugToolButton(Icons.Default.ContentCopy, "Копировать debug snapshot", "Копирует состояние приложения без хешей и паролей.") {
@@ -810,6 +817,7 @@ private fun buildDebugSnapshot(
     speedMetricMode: SpeedMetricMode,
     graphSpeedMetricMode: SpeedMetricMode,
     manualCaptchaOverlay: Boolean,
+    disableRuntimeWorkerApply: Boolean,
     overlayPermissionGranted: Boolean,
     diagnostics: AppDiagnosticsSnapshot
 ): String = buildString {
@@ -840,6 +848,7 @@ private fun buildDebugSnapshot(
     appendLine("Speed metric mode: ${speedMetricMode.id}")
     appendLine("Graph speed metric mode: ${graphSpeedMetricMode.id}")
     appendLine("Manual captcha overlay: enabled=$manualCaptchaOverlay permission=$overlayPermissionGranted")
+    appendLine("Runtime worker apply disabled: $disableRuntimeWorkerApply")
     appendLine("Diagnostics enabled: ${diagnostics.enabled}")
     appendLine("Diagnostics uptime: ${formatDiagnosticsUptime(diagnostics)}")
     appendLine("Diagnostics app memory: ${formatAppMemory(diagnostics)}")

@@ -1180,10 +1180,16 @@ fun PerformanceSettings(onBack: () -> Unit) {
     
     var lastWorkerCount by remember(workersCount) { mutableIntStateOf(workersCount) }
     var lastKeepaliveSeconds by remember(keepaliveSeconds) { mutableIntStateOf(keepaliveSeconds) }
+    var workerSliderValue by remember { mutableIntStateOf(workersCount) }
     var animateWorkersCount by remember { mutableStateOf(false) }
     var animateKeepaliveValue by remember { mutableStateOf(false) }
     var animateCaptchaSelection by remember { mutableStateOf(false) }
     var animateCoreBackendSelection by remember { mutableStateOf(false) }
+
+    LaunchedEffect(workersCount) {
+        workerSliderValue = workersCount
+        lastWorkerCount = workersCount
+    }
 
     fun openOverlayPermissionSettings() {
         overlayPermissionRefresh++
@@ -1278,7 +1284,7 @@ fun PerformanceSettings(onBack: () -> Unit) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text("Потоки обработки", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                 AnimatedContent(
-                    targetState = workersCount,
+                    targetState = workerSliderValue,
                     transitionSpec = {
                         if (animateWorkersCount) {
                             fadeIn(tween(120)) togetherWith fadeOut(tween(90))
@@ -1290,16 +1296,20 @@ fun PerformanceSettings(onBack: () -> Unit) {
                 ) { wc -> Text("$wc", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, fontSize = 16.sp) }
             }
             Slider(
-                value = workersCount.toFloat(),
+                value = workerSliderValue.toFloat(),
                 onValueChange = {
                     val clamped = it.roundToInt().coerceIn(1, 72)
                     if (clamped != lastWorkerCount) { animateWorkersCount = true; haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); lastWorkerCount = clamped }
+                    workerSliderValue = clamped
                     scope.launch { settingsStore.saveWorkersPerHash(clamped) }
+                    if (tunnelRunning) {
+                        TunnelManager.scheduleWorkerCountApply(clamped)
+                    }
                 },
                 valueRange = 1f..72f
             )
             AnimatedVisibility(
-                visible = workersCount < 12,
+                visible = workerSliderValue < 12,
                 enter = if (animateWorkersCount) fadeIn(tween(140)) + expandVertically(tween(180, easing = FastOutSlowInEasing)) else EnterTransition.None,
                 exit = if (animateWorkersCount) fadeOut(tween(100)) + shrinkVertically(tween(160, easing = FastOutSlowInEasing)) else ExitTransition.None
             ) {

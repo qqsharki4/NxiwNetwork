@@ -11,8 +11,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -53,6 +55,8 @@ object TunnelManager {
     private var readerJob: Job? = null
     private var watchdogJob: Job? = null
     private var metricsJob: Job? = null
+    private var runtimeSettingsJob: Job? = null
+    private var runtimeWorkerApplyJob: Job? = null
     private var wgHelper: WireGuardHelper? = null
     @Volatile private var processRestartExpected = false
     @Volatile private var processStopExpected = false
@@ -365,6 +369,7 @@ object TunnelManager {
                 coreProcessPid.value = process?.safePid()
                 running.value = true
                 activeCoreBackend.value = backendResolution.active
+                startRuntimeSettingsMonitor(settingsStore, totalWorkers)
                 updateWidgetState()
                 
                 val serverIp = nodeEndpointHost(peerEndpoint).ifBlank { params.peer.substringBefore(":") }
@@ -725,6 +730,10 @@ object TunnelManager {
         watchdogJob?.cancel()
         readerJob?.cancel()
         metricsJob?.cancel()
+        runtimeSettingsJob?.cancel()
+        runtimeSettingsJob = null
+        runtimeWorkerApplyJob?.cancel()
+        runtimeWorkerApplyJob = null
         resetCoreMetrics()
         currentPingMs.value = 0
         val proc = process
@@ -748,6 +757,50 @@ object TunnelManager {
 
     private fun stopOnlyProcess() {
         killProcess(keepRunning = true)
+    }
+
+    private fun startRuntimeSettingsMonitor(settingsStore: SettingsStore, initialWorkers: Int) {
+        runtimeSettingsJob?.cancel()
+        runtimeSettingsJob = scope.launch(Dispatchers.IO) {
+            currentParams = currentParams?.copy(workersPerHash = initialWorkers.coerceIn(1, 72))
+            settingsStore.workersPerHash
+                .map { it.coerceIn(1, 72) }
+                .collectLatest { requested ->
+                    val applied = currentParams?.workersPerHash?.coerceIn(1, 72)
+                    if (requested == applied) return@collectLatest
+                    scheduleWorkerCountApply(requested)
+                }
+        }
+    }
+
+    fun scheduleWorkerCountApply(workers: Int, delayMs: Long = 5_000L) {
+        val clamped = workers.coerceIn(1, 72)
+        runtimeWorkerApplyJob?.cancel()
+        runtimeWorkerApplyJob = scope.launch(Dispatchers.IO) {
+            delay(delayMs)
+            val params = currentParams
+            if (params?.workersPerHash?.coerceIn(1, 72) == clamped) return@launch
+            val ctx = lastContext ?: return@launch
+            if (SettingsStore(ctx).disableRuntimeWorkerApply.first()) return@launch
+            setWorkerCount(clamped)
+        }
+    }
+
+    fun setWorkerCount(workers: Int): Boolean {
+        val clamped = workers.coerceIn(1, 72)
+        if (running.value && currentParams?.workersPerHash?.coerceIn(1, 72) == clamped) {
+            return true
+        }
+        if (writeCoreCommand("SET_WORKERS|$clamped")) {
+            currentParams = currentParams?.copy(workersPerHash = clamped)
+            return true
+        }
+        if (running.value) {
+            updateLog("runtime_workers_apply_err", "[CONTROL] Не удалось отправить SET_WORKERS|$clamped", 200, true)
+        } else {
+            currentParams = currentParams?.copy(workersPerHash = clamped)
+        }
+        return false
     }
 
     fun stop(userRequested: Boolean = false) {
@@ -823,14 +876,22 @@ object TunnelManager {
     }
 
     private fun writeCaptchaResult(result: String) {
+        if (writeCoreCommand("CAPTCHA_RESULT|$result")) return
+        if (!running.value) return
+        updateLog("captcha_write_err", "[КАПЧА] Ошибка записи результата в ядро", 200, true)
+    }
+
+    @Synchronized
+    private fun writeCoreCommand(command: String): Boolean {
         val proc = process
-        if (proc == null || !proc.isAlive) return
-        try {
-            val line = "CAPTCHA_RESULT|$result\n"
+        if (proc == null || !proc.isAlive) return false
+        return try {
+            val line = if (command.endsWith('\n')) command else "$command\n"
             proc.outputStream.write(line.toByteArray(Charsets.UTF_8))
             proc.outputStream.flush()
+            true
         } catch (e: Exception) {
-            updateLog("captcha_write_err", "[КАПЧА] Ошибка записи: ${e.message}", 200, true)
+            false
         }
     }
 

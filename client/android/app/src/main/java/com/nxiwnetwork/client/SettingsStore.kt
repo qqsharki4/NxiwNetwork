@@ -67,6 +67,7 @@ class SettingsStore(context: Context) {
         private val SPEED_METRIC_MODE = stringPreferencesKey("speed_metric_mode")
         private val GRAPH_SPEED_METRIC_MODE = stringPreferencesKey("graph_speed_metric_mode")
         private val MANUAL_CAPTCHA_OVERLAY = booleanPreferencesKey("manual_captcha_overlay")
+        private val DISABLE_RUNTIME_WORKER_APPLY = booleanPreferencesKey("disable_runtime_worker_apply")
         const val DEFAULT_DASHBOARD_WIDGETS = "NODE,CONTROL,PING,SESSION,WORKERS,SPEED,GRAPH"
         const val DEFAULT_SPEED_METRIC_MODE = "total"
         private val SPEED_METRIC_MODES = setOf("total", "up", "down")
@@ -123,6 +124,7 @@ class SettingsStore(context: Context) {
     val speedMetricMode: Flow<String> = dataStore.data.map { normalizeSpeedMetricMode(it[SPEED_METRIC_MODE]) }
     val graphSpeedMetricMode: Flow<String> = dataStore.data.map { normalizeSpeedMetricMode(it[GRAPH_SPEED_METRIC_MODE]) }
     val manualCaptchaOverlay: Flow<Boolean> = dataStore.data.map { it[MANUAL_CAPTCHA_OVERLAY] ?: false }
+    val disableRuntimeWorkerApply: Flow<Boolean> = dataStore.data.map { it[DISABLE_RUNTIME_WORKER_APPLY] ?: false }
 	
     // НОВЫЙ FLOW ДЛЯ MTU (0 = Авто)
     val customMtu: Flow<Int> = dataStore.data.map { it[CUSTOM_MTU] ?: 0 }
@@ -191,6 +193,7 @@ class SettingsStore(context: Context) {
     suspend fun saveSpeedMetricMode(mode: String) { dataStore.edit { prefs -> prefs[SPEED_METRIC_MODE] = normalizeSpeedMetricMode(mode) } }
     suspend fun saveGraphSpeedMetricMode(mode: String) { dataStore.edit { prefs -> prefs[GRAPH_SPEED_METRIC_MODE] = normalizeSpeedMetricMode(mode) } }
     suspend fun saveManualCaptchaOverlay(enabled: Boolean) { dataStore.edit { prefs -> prefs[MANUAL_CAPTCHA_OVERLAY] = enabled } }
+    suspend fun saveDisableRuntimeWorkerApply(enabled: Boolean) { dataStore.edit { prefs -> prefs[DISABLE_RUNTIME_WORKER_APPLY] = enabled } }
     suspend fun getCachedAvailableUpdates(): List<AvailableUpdate> {
         return ReleaseUpdater.decodeAvailableUpdates(dataStore.data.first()[UPDATE_AVAILABLE_CACHE].orEmpty())
     }
