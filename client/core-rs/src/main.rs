@@ -129,6 +129,11 @@ struct WorkerEvent {
     kind: WorkerEventKind,
 }
 
+struct RunningWorker {
+    shutdown_tx: watch::Sender<bool>,
+    handle: JoinHandle<()>,
+}
+
 #[tokio::main]
 async fn main() {
     if let Err(err) = run().await {
@@ -664,6 +669,8 @@ impl Dispatcher {
 struct GroupHandle {
     group_id: usize,
     size: usize,
+    worker_ids: Vec<usize>,
+    resize_tx: watch::Sender<Vec<usize>>,
     shutdown_tx: watch::Sender<bool>,
     handle: JoinHandle<()>,
 }
@@ -785,20 +792,24 @@ async fn reconcile_worker_groups(
         if target_size == 0 {
             continue;
         }
-        let should_restart = handles
-            .get(&group_id)
-            .map(|handle| handle.size != target_size)
-            .unwrap_or(false);
-        if should_restart {
-            if let Some(handle) = handles.remove(&group_id) {
-                println!(
-                    "[CONTROL] Пересобираю группу #{}: {} → {} воркеров",
-                    group_id, handle.size, target_size
-                );
-                stop_group(handle).await;
+        if let Some(handle) = handles.get_mut(&group_id) {
+            if handle.size == target_size {
+                continue;
             }
-        }
-        if !handles.contains_key(&group_id) {
+            let mut worker_ids = handle.worker_ids.clone();
+            if worker_ids.len() < target_size {
+                for _ in 0..(target_size - worker_ids.len()) {
+                    worker_ids.push(*next_worker_id);
+                    *next_worker_id += 1;
+                }
+            } else {
+                worker_ids.truncate(target_size);
+            }
+            handle.size = target_size;
+            handle.worker_ids = worker_ids.clone();
+            println!("[CONTROL] Изменяю группу #{group_id}: {target_size} воркеров");
+            let _ = handle.resize_tx.send(worker_ids);
+        } else {
             let handle = start_group(
                 group_id,
                 target_size,
@@ -843,12 +854,13 @@ fn start_group(
         *next_worker_id += 1;
     }
     let (group_shutdown_tx, group_shutdown_rx) = watch::channel(false);
+    let (resize_tx, resize_rx) = watch::channel(worker_ids.clone());
     let group_args = args.clone();
     println!("[CONTROL] Запускаю группу #{group_id}: {size} воркеров");
     let handle = tokio::spawn(group_loop(
         group_id,
         group_id - 1,
-        worker_ids,
+        worker_ids.clone(),
         group_id == 1,
         peer,
         local_port.to_string(),
@@ -861,6 +873,7 @@ fn start_group(
         captcha_tx,
         auth_gate,
         group_shutdown_rx,
+        resize_rx,
         pause_rx,
         None,
         None,
@@ -868,6 +881,8 @@ fn start_group(
     GroupHandle {
         group_id,
         size,
+        worker_ids,
+        resize_tx,
         shutdown_tx: group_shutdown_tx,
         handle,
     }
@@ -918,7 +933,7 @@ async fn stop_all_groups(handles: &mut HashMap<usize, GroupHandle>) {
 async fn group_loop(
     group_id: usize,
     hash_index: usize,
-    worker_ids: Vec<usize>,
+    _worker_ids: Vec<usize>,
     get_config: bool,
     peer: SocketAddr,
     local_port: String,
@@ -931,6 +946,7 @@ async fn group_loop(
     captcha_tx: broadcast::Sender<String>,
     auth_gate: Arc<Mutex<()>>,
     mut shutdown_rx: watch::Receiver<bool>,
+    mut resize_rx: watch::Receiver<Vec<usize>>,
     mut pause_rx: watch::Receiver<bool>,
     wait_ready: Option<watch::Receiver<bool>>,
     signal_ready: Option<watch::Sender<bool>>,
@@ -942,19 +958,21 @@ async fn group_loop(
         }
     }
 
+    let mut target_worker_ids: Vec<usize>;
     let mut cycle_number = 0usize;
     let mut batch_shutdown: Option<watch::Sender<bool>> = None;
-    let mut batch_handles: Vec<JoinHandle<()>> = Vec::new();
+    let mut batch_workers: HashMap<usize, RunningWorker> = HashMap::new();
     let mut ready_signaled = false;
 
     loop {
+        target_worker_ids = resize_rx.borrow().clone();
         if *shutdown_rx.borrow() {
-            stop_batch(&mut batch_shutdown, &mut batch_handles).await;
+            stop_batch(&mut batch_shutdown, &mut batch_workers).await;
             return;
         }
 
         if *pause_rx.borrow() {
-            stop_batch(&mut batch_shutdown, &mut batch_handles).await;
+            stop_batch(&mut batch_shutdown, &mut batch_workers).await;
             println!("[ГРУППА #{group_id}] Пауза (Doze)");
             if wait_while_paused(&mut pause_rx, &mut shutdown_rx).await {
                 return;
@@ -995,60 +1013,38 @@ async fn group_loop(
         println!(
             "[ГРУППА #{group_id}] Креды OK, TURN: {:?}, {} воркеров, до смены кредов: {} сек",
             creds.turn_urls,
-            worker_ids.len(),
+            target_worker_ids.len(),
             sleep_secs
         );
 
-        stop_batch(&mut batch_shutdown, &mut batch_handles).await;
+        target_worker_ids = resize_rx.borrow().clone();
+        stop_batch(&mut batch_shutdown, &mut batch_workers).await;
         let (batch_shutdown_tx, batch_shutdown_rx) = watch::channel(false);
         batch_shutdown = Some(batch_shutdown_tx);
-        let (event_tx, mut event_rx) = mpsc::channel::<WorkerEvent>(worker_ids.len().max(1) * 2);
+        let (event_tx, mut event_rx) =
+            mpsc::channel::<WorkerEvent>(target_worker_ids.len().max(1) * 2);
         let mut quota_workers: HashSet<usize> = HashSet::new();
         let mut dead_workers: HashSet<usize> = HashSet::new();
         let config_request_in_flight = Arc::new(AtomicBool::new(false));
 
-        for (index, worker_id) in worker_ids.iter().copied().enumerate() {
-            let delay = Duration::from_millis((index as u64) * 500);
-            let worker_args = args.clone();
-            let worker_params = params.clone();
-            let worker_creds = creds.clone();
-            let worker_dispatcher = dispatcher.clone();
-            let worker_stats = stats.clone();
-            let worker_config_tx = config_tx.clone();
-            let worker_config_sent = config_sent.clone();
-            let worker_config_request_in_flight = config_request_in_flight.clone();
-            let worker_shutdown = shutdown_rx.clone();
-            let worker_batch_shutdown = batch_shutdown_rx.clone();
-            let worker_local_port = local_port.clone();
-            let worker_event_tx = event_tx.clone();
-            batch_handles.push(tokio::spawn(async move {
-                if !delay.is_zero() {
-                    tokio::select! {
-                        _ = time::sleep(delay) => {}
-                        _ = wait_for_any_shutdown(worker_shutdown.clone(), worker_batch_shutdown.clone()) => return,
-                    }
-                }
-                worker_loop(
-                    worker_id,
-                    peer,
-                    worker_local_port,
-                    worker_args,
-                    worker_params,
-                    worker_creds,
-                    worker_dispatcher,
-                    worker_config_tx,
-                    worker_config_sent,
-                    worker_config_request_in_flight,
-                    get_config,
-                    worker_stats,
-                    worker_shutdown,
-                    worker_batch_shutdown,
-                    worker_event_tx,
-                )
-                .await;
-            }));
-        }
-        drop(event_tx);
+        reconcile_batch_workers(
+            &target_worker_ids,
+            &mut batch_workers,
+            peer,
+            &local_port,
+            &args,
+            params.clone(),
+            creds.clone(),
+            dispatcher.clone(),
+            config_tx.clone(),
+            config_sent.clone(),
+            config_request_in_flight.clone(),
+            get_config,
+            stats.clone(),
+            shutdown_rx.clone(),
+            batch_shutdown_rx.clone(),
+            event_tx.clone(),
+        );
 
         if !ready_signaled {
             if let Some(signal_ready) = signal_ready.clone() {
@@ -1066,7 +1062,7 @@ async fn group_loop(
             tokio::select! {
                 _ = shutdown_rx.changed() => {
                     if *shutdown_rx.borrow() {
-                        stop_batch(&mut batch_shutdown, &mut batch_handles).await;
+                        stop_batch(&mut batch_shutdown, &mut batch_workers).await;
                         return;
                     }
                 }
@@ -1080,6 +1076,29 @@ async fn group_loop(
                     println!("[ГРУППА #{group_id}] TTL {} сек истёк, ротация", sleep_secs);
                     break;
                 }
+                changed = resize_rx.changed() => {
+                    if changed.is_ok() {
+                        target_worker_ids = resize_rx.borrow().clone();
+                        reconcile_batch_workers(
+                            &target_worker_ids,
+                            &mut batch_workers,
+                            peer,
+                            &local_port,
+                            &args,
+                            params.clone(),
+                            creds.clone(),
+                            dispatcher.clone(),
+                            config_tx.clone(),
+                            config_sent.clone(),
+                            config_request_in_flight.clone(),
+                            get_config,
+                            stats.clone(),
+                            shutdown_rx.clone(),
+                            batch_shutdown_rx.clone(),
+                            event_tx.clone(),
+                        );
+                    }
+                }
                 event = event_rx.recv() => {
                     let Some(event) = event else {
                         println!("[ГРУППА #{group_id}] Все воркеры завершились, беру новые креды");
@@ -1092,7 +1111,7 @@ async fn group_loop(
                         }
                         WorkerEventKind::Quota => {
                             quota_workers.insert(event.worker_id);
-                            let threshold = worker_ids.len().min(5).max(1);
+                            let threshold = target_worker_ids.len().min(5).max(1);
                             if quota_workers.len() >= threshold {
                                 println!(
                                     "[ГРУППА #{group_id}] Досрочная ротация: исчерпана квота TURN у {} воркеров",
@@ -1103,7 +1122,7 @@ async fn group_loop(
                         }
                         WorkerEventKind::CredsDead => {
                             dead_workers.insert(event.worker_id);
-                            let threshold = worker_ids.len().min(8).max(1);
+                            let threshold = target_worker_ids.len().min(8).max(1);
                             if dead_workers.len() >= threshold {
                                 println!(
                                     "[ГРУППА #{group_id}] Досрочная ротация: сервер ВК убил сессию у {} воркеров",
@@ -1121,15 +1140,111 @@ async fn group_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn reconcile_batch_workers(
+    worker_ids: &[usize],
+    batch_workers: &mut HashMap<usize, RunningWorker>,
+    peer: SocketAddr,
+    local_port: &str,
+    args: &CoreArgs,
+    params: Arc<TurnParams>,
+    creds: Arc<Credentials>,
+    dispatcher: Arc<Dispatcher>,
+    config_tx: mpsc::Sender<String>,
+    config_sent: Arc<AtomicBool>,
+    config_request_in_flight: Arc<AtomicBool>,
+    get_config: bool,
+    stats: Arc<Stats>,
+    shutdown_rx: watch::Receiver<bool>,
+    batch_shutdown_rx: watch::Receiver<bool>,
+    event_tx: mpsc::Sender<WorkerEvent>,
+) {
+    let desired: HashSet<usize> = worker_ids.iter().copied().collect();
+    let stale_workers: Vec<usize> = batch_workers
+        .keys()
+        .copied()
+        .filter(|worker_id| !desired.contains(worker_id))
+        .collect();
+    for worker_id in stale_workers {
+        if let Some(worker) = batch_workers.remove(&worker_id) {
+            let _ = worker.shutdown_tx.send(true);
+            tokio::spawn(async move {
+                let _ = time::timeout(Duration::from_secs(3), worker.handle).await;
+            });
+        }
+    }
+
+    let mut add_index = 0u64;
+    for worker_id in worker_ids.iter().copied() {
+        if batch_workers.contains_key(&worker_id) {
+            continue;
+        }
+        let delay = Duration::from_millis(add_index * 500);
+        add_index += 1;
+        let worker_args = args.clone();
+        let worker_params = params.clone();
+        let worker_creds = creds.clone();
+        let worker_dispatcher = dispatcher.clone();
+        let worker_stats = stats.clone();
+        let worker_config_tx = config_tx.clone();
+        let worker_config_sent = config_sent.clone();
+        let worker_config_request_in_flight = config_request_in_flight.clone();
+        let worker_shutdown = shutdown_rx.clone();
+        let worker_batch_shutdown = batch_shutdown_rx.clone();
+        let (single_shutdown_tx, single_shutdown_rx) = watch::channel(false);
+        let worker_local_port = local_port.to_string();
+        let worker_event_tx = event_tx.clone();
+        let handle = tokio::spawn(async move {
+            if !delay.is_zero() {
+                tokio::select! {
+                    _ = time::sleep(delay) => {}
+                    _ = wait_for_any_shutdown(
+                        worker_shutdown.clone(),
+                        worker_batch_shutdown.clone(),
+                        single_shutdown_rx.clone(),
+                    ) => return,
+                }
+            }
+            worker_loop(
+                worker_id,
+                peer,
+                worker_local_port,
+                worker_args,
+                worker_params,
+                worker_creds,
+                worker_dispatcher,
+                worker_config_tx,
+                worker_config_sent,
+                worker_config_request_in_flight,
+                get_config,
+                worker_stats,
+                worker_shutdown,
+                worker_batch_shutdown,
+                single_shutdown_rx,
+                worker_event_tx,
+            )
+            .await;
+        });
+        batch_workers.insert(
+            worker_id,
+            RunningWorker {
+                shutdown_tx: single_shutdown_tx,
+                handle,
+            },
+        );
+    }
+}
+
 async fn stop_batch(
     batch_shutdown: &mut Option<watch::Sender<bool>>,
-    handles: &mut Vec<JoinHandle<()>>,
+    workers: &mut HashMap<usize, RunningWorker>,
 ) {
     if let Some(tx) = batch_shutdown.take() {
         let _ = tx.send(true);
     }
-    for handle in handles.drain(..) {
-        let _ = time::timeout(Duration::from_secs(3), handle).await;
+    for (_, worker) in workers.drain() {
+        let _ = worker.shutdown_tx.send(true);
+        let _ = time::timeout(Duration::from_secs(3), worker.handle).await;
     }
 }
 
@@ -1179,14 +1294,16 @@ async fn wait_or_shutdown(duration: Duration, shutdown_rx: &mut watch::Receiver<
 async fn wait_for_any_shutdown(
     mut shutdown_rx: watch::Receiver<bool>,
     mut batch_shutdown_rx: watch::Receiver<bool>,
+    mut worker_shutdown_rx: watch::Receiver<bool>,
 ) {
     loop {
-        if *shutdown_rx.borrow() || *batch_shutdown_rx.borrow() {
+        if *shutdown_rx.borrow() || *batch_shutdown_rx.borrow() || *worker_shutdown_rx.borrow() {
             return;
         }
         tokio::select! {
             _ = shutdown_rx.changed() => {}
             _ = batch_shutdown_rx.changed() => {}
+            _ = worker_shutdown_rx.changed() => {}
         }
     }
 }
@@ -1206,11 +1323,12 @@ async fn worker_loop(
     stats: Arc<Stats>,
     mut shutdown_rx: watch::Receiver<bool>,
     mut batch_shutdown_rx: watch::Receiver<bool>,
+    mut worker_shutdown_rx: watch::Receiver<bool>,
     event_tx: mpsc::Sender<WorkerEvent>,
 ) {
     let mut attempt = 0usize;
     loop {
-        if *shutdown_rx.borrow() || *batch_shutdown_rx.borrow() {
+        if *shutdown_rx.borrow() || *batch_shutdown_rx.borrow() || *worker_shutdown_rx.borrow() {
             return;
         }
         let get_config = group_get_config
@@ -1235,6 +1353,7 @@ async fn worker_loop(
             stats.clone(),
             shutdown_rx.clone(),
             batch_shutdown_rx.clone(),
+            worker_shutdown_rx.clone(),
         )
         .await;
 
@@ -1243,7 +1362,8 @@ async fn worker_loop(
         }
 
         if let Err(err) = result {
-            if *shutdown_rx.borrow() || *batch_shutdown_rx.borrow() {
+            if *shutdown_rx.borrow() || *batch_shutdown_rx.borrow() || *worker_shutdown_rx.borrow()
+            {
                 return;
             }
             attempt += 1;
@@ -1272,6 +1392,11 @@ async fn worker_loop(
             }
             _ = batch_shutdown_rx.changed() => {
                 if *batch_shutdown_rx.borrow() {
+                    return;
+                }
+            }
+            _ = worker_shutdown_rx.changed() => {
+                if *worker_shutdown_rx.borrow() {
                     return;
                 }
             }
@@ -1316,6 +1441,7 @@ async fn run_session(
     stats: Arc<Stats>,
     mut shutdown_rx: watch::Receiver<bool>,
     mut batch_shutdown_rx: watch::Receiver<bool>,
+    mut worker_shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     let selected_url = creds
         .turn_urls
@@ -1453,6 +1579,11 @@ async fn run_session(
             }
             _ = batch_shutdown_rx.changed() => {
                 if *batch_shutdown_rx.borrow() {
+                    break;
+                }
+            }
+            _ = worker_shutdown_rx.changed() => {
+                if *worker_shutdown_rx.borrow() {
                     break;
                 }
             }

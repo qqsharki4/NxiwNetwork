@@ -22,6 +22,11 @@ const (
 	defaultCycleSecs = 36000
 )
 
+type runningGroupWorker struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
 // WorkerGroup:
 // бесшовная ротация: получить новые креды → запустить новый батч → убить старый.
 func WorkerGroup(
@@ -36,6 +41,7 @@ func WorkerGroup(
 	getConfig bool,
 	configCh chan<- string,
 	workerIDs []int,
+	resizeCh <-chan []int,
 	cycleDuration time.Duration,
 	pauseFlag *int32,
 	deviceID, password string,
@@ -54,6 +60,44 @@ func WorkerGroup(
 		}
 	}
 
+	copyWorkerIDs := func(ids []int) []int {
+		return append([]int(nil), ids...)
+	}
+
+	targetWorkerIDs := copyWorkerIDs(workerIDs)
+	var desiredWorkerCount int32
+	storeDesiredWorkerCount := func(ids []int) {
+		count := len(ids)
+		if count < 1 {
+			count = 1
+		}
+		atomic.StoreInt32(&desiredWorkerCount, int32(count))
+	}
+	storeDesiredWorkerCount(targetWorkerIDs)
+
+	drainResize := func() {
+		for {
+			select {
+			case ids := <-resizeCh:
+				if len(ids) == 0 {
+					continue
+				}
+				targetWorkerIDs = copyWorkerIDs(ids)
+				storeDesiredWorkerCount(targetWorkerIDs)
+			default:
+				return
+			}
+		}
+	}
+
+	workerThreshold := func(limit int) int {
+		count := int(atomic.LoadInt32(&desiredWorkerCount))
+		if count < 1 {
+			count = 1
+		}
+		return minInt(limit, count)
+	}
+
 	cycleNumber := 0
 	var configSent int32
 	if !getConfig {
@@ -62,20 +106,20 @@ func WorkerGroup(
 
 	// Предыдущий батч
 	var prevCancel context.CancelFunc
-	var prevDoneChs []chan struct{}
+	var prevWorkers map[int]*runningGroupWorker
 	var commonSignalOnce sync.Once
 
 	killBatch := func() {
 		if prevCancel != nil {
 			prevCancel()
-			for _, ch := range prevDoneChs {
+			for _, worker := range prevWorkers {
 				select {
-				case <-ch:
+				case <-worker.done:
 				case <-time.After(3 * time.Second):
 				}
 			}
 			prevCancel = nil
-			prevDoneChs = nil
+			prevWorkers = nil
 		}
 	}
 	defer killBatch()
@@ -84,6 +128,7 @@ func WorkerGroup(
 		if ctx.Err() != nil {
 			return
 		}
+		drainResize()
 
 		// Doze-mode пауза: убиваем воркеров и ждём RESUME
 		if atomic.LoadInt32(pauseFlag) != 0 {
@@ -127,6 +172,8 @@ func WorkerGroup(
 			continue
 		}
 
+		drainResize()
+
 		// Вычисляем точное время жизни на основе ответа VK (минус 2 минуты для надёжности)
 		sleepDuration := defaultCycleSecs
 		if creds.Lifetime > 120 {
@@ -134,10 +181,10 @@ func WorkerGroup(
 		}
 		cycleDurationLocal := time.Duration(sleepDuration) * time.Second
 
-		groupWorkerCount := len(workerIDs)
+		groupWorkerCount := len(targetWorkerIDs)
 		log.Printf("[ГРУППА #%d] Запуск %d потоков (до смены кредов: %d сек)", groupID, groupWorkerCount, sleepDuration)
 
-		log.Printf("[ГРУППА #%d] Креды OK, TURN: %v, %d воркеров", groupID, creds.TurnURLs, len(workerIDs))
+		log.Printf("[ГРУППА #%d] Креды OK, TURN: %v, %d воркеров", groupID, creds.TurnURLs, len(targetWorkerIDs))
 
 		// ТЕПЕРЬ убиваем старый батч (креды уже готовы — минимальный простой)
 		killBatch()
@@ -147,7 +194,7 @@ func WorkerGroup(
 		var configRequestInFlight int32
 
 		refreshCh := make(chan struct{}, 1)
-		doneChs := make([]chan struct{}, len(workerIDs))
+		activeWorkers := make(map[int]*runningGroupWorker)
 		var quotaErrorWorkers sync.Map
 		var notFoundErrorWorkers sync.Map
 
@@ -162,12 +209,20 @@ func WorkerGroup(
 			})
 		}()
 
-		for i, wid := range workerIDs {
-			doneCh := make(chan struct{})
-			doneChs[i] = doneCh
+		stopWorker := func(worker *runningGroupWorker) {
+			worker.cancel()
+			go func(done <-chan struct{}) {
+				select {
+				case <-done:
+				case <-time.After(3 * time.Second):
+				}
+			}(worker.done)
+		}
 
-			// Stagger: 500мс между воркерами
-			workerDelay := time.Duration(i) * 500 * time.Millisecond
+		launchWorker := func(wid int, delay time.Duration) {
+			doneCh := make(chan struct{})
+			workerCtx, workerCancel := context.WithCancel(batchCtx)
+			activeWorkers[wid] = &runningGroupWorker{cancel: workerCancel, done: doneCh}
 
 			go func(wid int, delay time.Duration, doneCh chan struct{}) {
 				defer close(doneCh)
@@ -175,7 +230,7 @@ func WorkerGroup(
 				if delay > 0 {
 					select {
 					case <-time.After(delay):
-					case <-batchCtx.Done():
+					case <-workerCtx.Done():
 						return
 					}
 				}
@@ -185,7 +240,7 @@ func WorkerGroup(
 				// Retry loop: воркер переподключается при ошибке
 				attempt := 0
 				for {
-					if batchCtx.Err() != nil {
+					if workerCtx.Err() != nil {
 						return
 					}
 
@@ -198,7 +253,7 @@ func WorkerGroup(
 						cc = configCh
 					}
 
-					configDelivered, sessErr := RunSession(batchCtx, tp, peer, d, localPort, useUDP,
+					configDelivered, sessErr := RunSession(workerCtx, tp, peer, d, localPort, useUDP,
 						getConf, cc, wid, creds, deviceID, password, keepaliveInterval, stats)
 
 					if getConf {
@@ -210,7 +265,7 @@ func WorkerGroup(
 					}
 
 					if sessErr != nil {
-						if batchCtx.Err() != nil {
+						if workerCtx.Err() != nil {
 							return
 						}
 						errStr := sessErr.Error()
@@ -237,7 +292,7 @@ func WorkerGroup(
 							quotaErrorWorkers.Store(wid, true)
 							qCount := 0
 							quotaErrorWorkers.Range(func(k, v any) bool { qCount++; return true })
-							if qCount >= minInt(5, groupWorkerCount) {
+							if qCount >= workerThreshold(5) {
 								select {
 								case refreshCh <- struct{}{}:
 									log.Printf("[ГРУППА #%d] Досрочная ротация: исчерпана квота TURN у %d воркеров", groupID, qCount)
@@ -273,7 +328,7 @@ func WorkerGroup(
 							notFoundErrorWorkers.Range(func(k, v any) bool { nfCount++; return true })
 
 							// Если большинство воркеров получили явный отказ от сервера — ключи протухли.
-							if nfCount >= minInt(8, groupWorkerCount) {
+							if nfCount >= workerThreshold(8) {
 								select {
 								case refreshCh <- struct{}{}:
 									log.Printf("[ГРУППА #%d] Досрочная ротация: сервер ВК убил сессию (у %d воркеров)", groupID, nfCount)
@@ -283,7 +338,7 @@ func WorkerGroup(
 						}
 					}
 
-					if batchCtx.Err() != nil {
+					if workerCtx.Err() != nil {
 						return
 					}
 
@@ -291,25 +346,73 @@ func WorkerGroup(
 					retryDelay := time.Duration(5+rand.Intn(11)) * time.Second
 					select {
 					case <-time.After(retryDelay):
-					case <-batchCtx.Done():
+					case <-workerCtx.Done():
 						return
 					}
 				}
-			}(wid, workerDelay, doneCh)
+			}(wid, delay, doneCh)
 		}
+
+		reconcileWorkers := func(ids []int) {
+			desired := make(map[int]struct{}, len(ids))
+			for _, wid := range ids {
+				desired[wid] = struct{}{}
+			}
+			for wid, worker := range activeWorkers {
+				if _, ok := desired[wid]; ok {
+					continue
+				}
+				delete(activeWorkers, wid)
+				stopWorker(worker)
+			}
+			addIndex := 0
+			for _, wid := range ids {
+				if _, ok := activeWorkers[wid]; ok {
+					continue
+				}
+				launchWorker(wid, time.Duration(addIndex)*500*time.Millisecond)
+				addIndex++
+			}
+		}
+
+		reconcileWorkers(targetWorkerIDs)
 
 		// Сохраняем батч для бесшовной ротации
 		prevCancel = batchCancel
-		prevDoneChs = doneChs
+		prevWorkers = activeWorkers
 
-		// Ждём TTL либо сигнала досрочной ротации
-		select {
-		case <-time.After(cycleDurationLocal):
-			log.Printf("[ГРУППА #%d] TTL %v истёк, ротация", groupID, cycleDurationLocal)
-		case <-refreshCh:
-			log.Printf("[ГРУППА #%d] Вызвана досрочная ротация (креды не отвечали)", groupID)
-		case <-ctx.Done():
-			return
+		// Ждём TTL, досрочной ротации или точечного изменения состава воркеров.
+		ttlTimer := time.NewTimer(cycleDurationLocal)
+		rotate := false
+		for !rotate {
+			select {
+			case <-ttlTimer.C:
+				log.Printf("[ГРУППА #%d] TTL %v истёк, ротация", groupID, cycleDurationLocal)
+				rotate = true
+			case <-refreshCh:
+				log.Printf("[ГРУППА #%d] Вызвана досрочная ротация (креды не отвечали)", groupID)
+				rotate = true
+			case ids := <-resizeCh:
+				if len(ids) > 0 {
+					targetWorkerIDs = copyWorkerIDs(ids)
+					storeDesiredWorkerCount(targetWorkerIDs)
+					reconcileWorkers(targetWorkerIDs)
+				}
+			case <-ctx.Done():
+				if !ttlTimer.Stop() {
+					select {
+					case <-ttlTimer.C:
+					default:
+					}
+				}
+				return
+			}
+		}
+		if !ttlTimer.Stop() {
+			select {
+			case <-ttlTimer.C:
+			default:
+			}
 		}
 
 		cycleNumber++

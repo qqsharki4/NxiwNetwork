@@ -322,10 +322,12 @@ type workerSupervisor struct {
 }
 
 type workerGroupHandle struct {
-	groupID int
-	size    int
-	cancel  context.CancelFunc
-	done    chan struct{}
+	groupID   int
+	size      int
+	workerIDs []int
+	resizeCh  chan []int
+	cancel    context.CancelFunc
+	done      chan struct{}
 }
 
 func groupCountForWorkers(workers int) int {
@@ -408,9 +410,17 @@ func (s *workerSupervisor) reconcile(ctx context.Context, handles map[int]*worke
 			if handle.size == targetSize {
 				continue
 			}
-			log.Printf("[CONTROL] Пересобираю группу #%d: %d → %d воркеров", groupID, handle.size, targetSize)
-			s.stopGroup(handle)
-			delete(handles, groupID)
+			workerIDs := append([]int(nil), handle.workerIDs...)
+			if len(workerIDs) < targetSize {
+				workerIDs = append(workerIDs, s.nextWorkerIDs(targetSize-len(workerIDs))...)
+			} else {
+				workerIDs = workerIDs[:targetSize]
+			}
+			handle.size = targetSize
+			handle.workerIDs = append([]int(nil), workerIDs...)
+			log.Printf("[CONTROL] Изменяю группу #%d: %d воркеров", groupID, targetSize)
+			s.sendGroupResize(handle, workerIDs)
+			continue
 		}
 		handles[groupID] = s.startGroup(ctx, groupID, targetSize)
 	}
@@ -420,6 +430,7 @@ func (s *workerSupervisor) startGroup(ctx context.Context, groupID, size int) *w
 	groupCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	workerIDs := s.nextWorkerIDs(size)
+	resizeCh := make(chan []int, 1)
 	getConfig := groupID == 1
 	var configCh chan<- string
 	if getConfig {
@@ -429,14 +440,29 @@ func (s *workerSupervisor) startGroup(ctx context.Context, groupID, size int) *w
 	go func() {
 		defer close(done)
 		WorkerGroup(groupCtx, groupID, groupID-1, s.tp, s.peer, s.dispatcher, s.localPort, s.useUDP,
-			getConfig, configCh, workerIDs, time.Duration(defaultCycleSecs)*time.Second, s.pauseFlag,
+			getConfig, configCh, workerIDs, resizeCh, time.Duration(defaultCycleSecs)*time.Second, s.pauseFlag,
 			s.deviceID, s.password, s.keepaliveInterval, s.stats, nil, nil)
 	}()
 	return &workerGroupHandle{
-		groupID: groupID,
-		size:    size,
-		cancel:  cancel,
-		done:    done,
+		groupID:   groupID,
+		size:      size,
+		workerIDs: append([]int(nil), workerIDs...),
+		resizeCh:  resizeCh,
+		cancel:    cancel,
+		done:      done,
+	}
+}
+
+func (s *workerSupervisor) sendGroupResize(handle *workerGroupHandle, workerIDs []int) {
+	payload := append([]int(nil), workerIDs...)
+	select {
+	case handle.resizeCh <- payload:
+	default:
+		select {
+		case <-handle.resizeCh:
+		default:
+		}
+		handle.resizeCh <- payload
 	}
 }
 
