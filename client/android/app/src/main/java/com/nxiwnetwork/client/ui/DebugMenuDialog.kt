@@ -78,6 +78,7 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
     val graphSpeedMetricModeRaw by settingsStore.graphSpeedMetricMode.collectAsStateWithLifecycle(SettingsStore.DEFAULT_SPEED_METRIC_MODE)
     val manualCaptchaOverlay by settingsStore.manualCaptchaOverlay.collectAsStateWithLifecycle(false)
     val disableRuntimeWorkerApply by settingsStore.disableRuntimeWorkerApply.collectAsStateWithLifecycle(false)
+    val suppressBatteryOptimizationPrompt by settingsStore.suppressBatteryOptimizationPrompt.collectAsStateWithLifecycle(false)
     val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
     val activeBackend by TunnelManager.activeCoreBackend.collectAsStateWithLifecycle()
     val activeWorkers by TunnelManager.activeWorkers.collectAsStateWithLifecycle()
@@ -157,6 +158,7 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
         graphSpeedMetricModeRaw,
         manualCaptchaOverlay,
         disableRuntimeWorkerApply,
+        suppressBatteryOptimizationPrompt,
         overlayPermissionGranted,
         diagnostics
     ) {
@@ -193,6 +195,7 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
             graphSpeedMetricMode = graphSpeedMetricMode,
             manualCaptchaOverlay = manualCaptchaOverlay,
             disableRuntimeWorkerApply = disableRuntimeWorkerApply,
+            suppressBatteryOptimizationPrompt = suppressBatteryOptimizationPrompt,
             overlayPermissionGranted = overlayPermissionGranted,
             diagnostics = diagnostics
         )
@@ -358,6 +361,10 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
                     DebugSwitchRow("Не делать авто применение в рантайме", "Если включено, слайдер потоков сохраняет настройку, но не отправляет SET_WORKERS в работающее ядро.", disableRuntimeWorkerApply) { enabled ->
                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                         scope.launch { settingsStore.saveDisableRuntimeWorkerApply(enabled) }
+                    }
+                    DebugSwitchRow("Не просить отключить экономию батареи", "Если включено, приложение не будет автоматически открывать системный запрос оптимизации батареи при старте.", suppressBatteryOptimizationPrompt) { enabled ->
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        scope.launch { settingsStore.saveSuppressBatteryOptimizationPrompt(enabled) }
                     }
                     DebugWavyProgressPreview()
                     DebugMaterial3ExpressivePreview()
@@ -818,6 +825,7 @@ private fun buildDebugSnapshot(
     graphSpeedMetricMode: SpeedMetricMode,
     manualCaptchaOverlay: Boolean,
     disableRuntimeWorkerApply: Boolean,
+    suppressBatteryOptimizationPrompt: Boolean,
     overlayPermissionGranted: Boolean,
     diagnostics: AppDiagnosticsSnapshot
 ): String = buildString {
@@ -849,6 +857,7 @@ private fun buildDebugSnapshot(
     appendLine("Graph speed metric mode: ${graphSpeedMetricMode.id}")
     appendLine("Manual captcha overlay: enabled=$manualCaptchaOverlay permission=$overlayPermissionGranted")
     appendLine("Runtime worker apply disabled: $disableRuntimeWorkerApply")
+    appendLine("Battery optimization prompt suppressed: $suppressBatteryOptimizationPrompt")
     appendLine("Diagnostics enabled: ${diagnostics.enabled}")
     appendLine("Diagnostics uptime: ${formatDiagnosticsUptime(diagnostics)}")
     appendLine("Diagnostics app memory: ${formatAppMemory(diagnostics)}")

@@ -542,11 +542,14 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun checkAndRequestBattery() {
-        val pm = getSystemService(POWER_SERVICE) as PowerManager
-        if (!pm.isIgnoringBatteryOptimizations(packageName)) {
-            try {
-                batteryLauncher.launch(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply { data = Uri.parse("package:$packageName") })
-            } catch (e: Exception) { e.printStackTrace() }
+        lifecycleScope.launch {
+            if (SettingsStore(this@MainActivity).suppressBatteryOptimizationPrompt.first()) return@launch
+            val pm = getSystemService(POWER_SERVICE) as PowerManager
+            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                try {
+                    batteryLauncher.launch(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply { data = Uri.parse("package:$packageName") })
+                } catch (e: Exception) { e.printStackTrace() }
+            }
         }
     }
 
