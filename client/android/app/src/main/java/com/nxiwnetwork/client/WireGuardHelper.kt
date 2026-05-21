@@ -72,9 +72,7 @@ class WireGuardHelper(context: Context) {
                 builder.parseListenPort(parsedConfig.`interface`.listenPort.get().toString())
             }
 
-            val userMtu = settingsStore.customMtu.first()
             when {
-                userMtu in 1280..1500 -> builder.parseMtu(userMtu.toString())
                 parsedConfig.`interface`.mtu.isPresent ->
                     builder.parseMtu(parsedConfig.`interface`.mtu.get().coerceAtLeast(1280).toString())
                 else -> builder.parseMtu("1280")

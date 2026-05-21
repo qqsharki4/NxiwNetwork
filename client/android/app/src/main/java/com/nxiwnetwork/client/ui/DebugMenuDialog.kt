@@ -82,6 +82,10 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
     val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
     val activeBackend by TunnelManager.activeCoreBackend.collectAsStateWithLifecycle()
     val coreProtocolMode by TunnelManager.coreProtocolMode.collectAsStateWithLifecycle()
+    val activeRequestedMtu by TunnelManager.activeRequestedMtu.collectAsStateWithLifecycle()
+    val activeRequestedDns by TunnelManager.activeRequestedDns.collectAsStateWithLifecycle()
+    val activeWireGuardMtu by TunnelManager.activeWireGuardMtu.collectAsStateWithLifecycle()
+    val activeWireGuardDns by TunnelManager.activeWireGuardDns.collectAsStateWithLifecycle()
     val activeWorkers by TunnelManager.activeWorkers.collectAsStateWithLifecycle()
     val stats by TunnelManager.stats.collectAsStateWithLifecycle()
     val pingMs by TunnelManager.currentPingMs.collectAsStateWithLifecycle()
@@ -238,11 +242,18 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
                     DebugInfoRow("Туннель", if (tunnelRunning) "запущен" else "остановлен")
                     DebugInfoRow("Ядро", "${selectedBackend.label} выбрано / ${activeBackend?.label ?: "нет"} активно")
                     DebugInfoRow("Протокол ноды", coreProtocolMode)
+                    DebugNodePolicyAlert(
+                        coreProtocolMode = coreProtocolMode,
+                        activeRequestedMtu = activeRequestedMtu,
+                        activeRequestedDns = activeRequestedDns,
+                        activeWireGuardMtu = activeWireGuardMtu,
+                        activeWireGuardDns = activeWireGuardDns
+                    )
                     DebugInfoRow("Транспорт", protocol.uppercase())
                     DebugInfoRow("Потоки", "$workers настроено / $activeWorkers активно")
                     DebugInfoRow("Keepalive", "$keepaliveSeconds сек")
-                    DebugInfoRow("MTU", if (customMtu == 0) "авто" else customMtu.toString())
-                    DebugInfoRow("DNS", dnsLabel)
+                    DebugInfoRow("MTU", formatActiveMtu(customMtu, activeRequestedMtu, activeWireGuardMtu, tunnelRunning))
+                    DebugInfoRow("DNS", formatActiveDns(dnsLabel, activeRequestedDns, activeWireGuardDns, tunnelRunning))
                     DebugInfoRow("Ping", if (pingMs > 0) "$pingMs ms" else "нет данных")
                     DebugInfoRow("Скорость", formatDebugSpeed(speedBytes))
                     DebugInfoRow("Статистика", stats)
@@ -498,6 +509,77 @@ private fun DebugNodePolicyPreview() {
 }
 
 @Composable
+private fun DebugNodePolicyAlert(
+    coreProtocolMode: String,
+    activeRequestedMtu: Int,
+    activeRequestedDns: String,
+    activeWireGuardMtu: Int,
+    activeWireGuardDns: String
+) {
+    val protocolAppliedMtu = remember(coreProtocolMode) { extractAppliedMtu(coreProtocolMode) }
+    val protocolAppliedDns = remember(coreProtocolMode) { extractAppliedDns(coreProtocolMode).orEmpty() }
+    val appliedMtu = activeWireGuardMtu.takeIf { it > 0 } ?: protocolAppliedMtu
+    val appliedDns = activeWireGuardDns.ifBlank { protocolAppliedDns }
+    val policyMtu = remember(coreProtocolMode) { extractPolicyMtu(coreProtocolMode) }
+    val requestedDns = activeRequestedDns.trim()
+    val mtuMismatch = activeRequestedMtu > 0 && appliedMtu != null && appliedMtu != activeRequestedMtu
+    val dnsMismatch = requestedDns.isNotEmpty() &&
+        appliedDns.isNotEmpty() &&
+        normalizeDnsForCompare(appliedDns) != normalizeDnsForCompare(requestedDns)
+    if (!mtuMismatch && !dnsMismatch) return
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.42f), RoundedCornerShape(14.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.WarningAmber, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Policy mismatch", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
+        }
+        if (mtuMismatch) {
+            Text(
+                "MTU: сессия запросила $activeRequestedMtu, фактически $appliedMtu${policyMtu?.let { " / лимит $it" } ?: ""}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                lineHeight = 16.sp
+            )
+        }
+        if (dnsMismatch) {
+            Text(
+                "DNS: сессия запросила $requestedDns, фактически $appliedDns",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                lineHeight = 16.sp
+            )
+        }
+    }
+}
+
+private fun formatActiveMtu(configuredMtu: Int, requestedMtu: Int, activeMtu: Int, tunnelRunning: Boolean): String {
+    val configured = if (configuredMtu == 0) "авто" else configuredMtu.toString()
+    if (!tunnelRunning || activeMtu <= 0) return configured
+    val requested = if (requestedMtu == 0) "авто" else requestedMtu.toString()
+    return "факт $activeMtu / сессия $requested / настройки $configured"
+}
+
+private fun formatActiveDns(configuredDns: String, requestedDns: String, activeDns: String, tunnelRunning: Boolean): String {
+    if (!tunnelRunning || activeDns.isBlank()) return configuredDns
+    val requested = requestedDns.ifBlank { "default" }
+    return "факт $activeDns / сессия $requested / настройки $configuredDns"
+}
+
+private fun normalizeDnsForCompare(raw: String): String {
+    return raw.split(',', ';', ' ', '\t', '\n', '\r')
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .joinToString(",")
+}
+
+@Composable
 private fun DebugPolicyPreviewRow(label: String, value: String) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -507,6 +589,18 @@ private fun DebugPolicyPreviewRow(label: String, value: String) {
         Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(value, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Medium)
     }
+}
+
+private fun extractAppliedMtu(raw: String): Int? {
+    return Regex("""MTU\s+(\d+)""").find(raw)?.groupValues?.getOrNull(1)?.toIntOrNull()
+}
+
+private fun extractAppliedDns(raw: String): String? {
+    return Regex("""DNS\s+([^,\s/]+)""").find(raw)?.groupValues?.getOrNull(1)?.trim()
+}
+
+private fun extractPolicyMtu(raw: String): String? {
+    return Regex("""mtu:([0-9]+-[0-9]+)""").find(raw)?.groupValues?.getOrNull(1)
 }
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)

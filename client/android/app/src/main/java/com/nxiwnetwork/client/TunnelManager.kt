@@ -82,6 +82,10 @@ object TunnelManager {
     val coreProtocolMode = MutableStateFlow("нет данных")
     val coreProcessPid = MutableStateFlow<Int?>(null)
     val tunnelStartedAtElapsedMs = MutableStateFlow<Long?>(null)
+    val activeRequestedMtu = MutableStateFlow(0)
+    val activeRequestedDns = MutableStateFlow("")
+    val activeWireGuardMtu = MutableStateFlow(0)
+    val activeWireGuardDns = MutableStateFlow("")
     
     val cooldownSeconds = MutableStateFlow(0)
     private var cooldownJob: Job? = null
@@ -376,11 +380,13 @@ object TunnelManager {
                     cmd.add(params.sni)
                 }
                 val dnsOverride = resolveCoreDnsOverride(settingsStore)
+                activeRequestedDns.value = dnsOverride
                 if (dnsOverride.isNotEmpty()) {
                     cmd.add("-dns")
                     cmd.add(dnsOverride)
                 }
                 val mtuOverride = settingsStore.customMtu.first()
+                activeRequestedMtu.value = mtuOverride
                 if (mtuOverride > 0) {
                     cmd.add("-mtu")
                     cmd.add(mtuOverride.toString())
@@ -655,6 +661,8 @@ object TunnelManager {
                             collectingConfig = false
                             val configStr = configBuilder.toString().trim()
                             config.value = configStr
+                            activeWireGuardMtu.value = extractWireGuardConfigValue(configStr, "MTU")?.toIntOrNull() ?: 0
+                            activeWireGuardDns.value = extractWireGuardConfigValue(configStr, "DNS").orEmpty()
                             
                             scope.launch(Dispatchers.Main) {
                                 try {
@@ -688,6 +696,10 @@ object TunnelManager {
                     running.value = false
                     activeCoreBackend.value = null
                     coreProtocolMode.value = "нет данных"
+                    activeRequestedMtu.value = 0
+                    activeRequestedDns.value = ""
+                    activeWireGuardMtu.value = 0
+                    activeWireGuardDns.value = ""
                     stats.value = "Остановлено"
                     updateWidgetState()
                 }
@@ -699,6 +711,15 @@ object TunnelManager {
     private fun handleCriticalError(message: String) {
         updateLog("circuit_breaker", "[СТОП] $message", -1, true)
         stop()
+    }
+
+    private fun extractWireGuardConfigValue(config: String, key: String): String? {
+        return config.lineSequence()
+            .map { it.trim() }
+            .firstOrNull { it.startsWith("$key =") }
+            ?.substringAfter("=")
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
     }
 
     private fun handleHashError() {
