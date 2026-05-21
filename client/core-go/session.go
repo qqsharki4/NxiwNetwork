@@ -255,7 +255,7 @@ func RunSession(
 
 	// Запрос конфига
 	if getConfig && configCh != nil {
-		conf, confErr := RequestConfig(dtlsConn, localPort, deviceID, password)
+		conf, confErr := RequestConfig(dtlsConn, localPort, deviceID, password, tp.Dns)
 		if confErr != nil {
 			errStr := confErr.Error()
 			if strings.Contains(errStr, "FATAL_AUTH") {

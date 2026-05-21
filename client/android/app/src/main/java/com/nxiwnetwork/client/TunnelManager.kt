@@ -334,6 +334,11 @@ object TunnelManager {
                     cmd.add("-sni")
                     cmd.add(params.sni)
                 }
+                val dnsOverride = resolveCoreDnsOverride(settingsStore)
+                if (dnsOverride.isNotEmpty()) {
+                    cmd.add("-dns")
+                    cmd.add(dnsOverride)
+                }
 
                 val androidId = android.provider.Settings.Secure.getString(context.contentResolver, android.provider.Settings.Secure.ANDROID_ID) ?: "unknown"
                 cmd.add("-device-id")
@@ -383,6 +388,15 @@ object TunnelManager {
                 activeCoreBackend.value = null
                 updateWidgetState()
             }
+        }
+    }
+
+    private suspend fun resolveCoreDnsOverride(settingsStore: SettingsStore): String {
+        return when (settingsStore.customDns.first()) {
+            "adguard" -> "94.140.14.14,94.140.15.15"
+            "cloudflare" -> "1.1.1.1,1.0.0.1"
+            "custom" -> settingsStore.customDnsIp.first().trim()
+            else -> ""
         }
     }
 

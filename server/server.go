@@ -799,7 +799,26 @@ func configureInterface(ifaceName string) error {
 	return nil
 }
 
-func buildClientConfig(serverPublic, clientPrivate, clientIP, clientPort string) string {
+func normalizeClientDNS(raw string) string {
+	parts := strings.FieldsFunc(strings.TrimSpace(raw), func(r rune) bool {
+		return r == ',' || r == ';' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	})
+	if len(parts) == 0 {
+		return dns
+	}
+	servers := make([]string, 0, len(parts))
+	for _, part := range parts {
+		ip := net.ParseIP(strings.TrimSpace(part))
+		if ip == nil {
+			return dns
+		}
+		servers = append(servers, ip.String())
+	}
+	return strings.Join(servers, ", ")
+}
+
+func buildClientConfig(serverPublic, clientPrivate, clientIP, clientPort, clientDNS string) string {
+	configDNS := normalizeClientDNS(clientDNS)
 	return fmt.Sprintf(`[Interface]
 PrivateKey = %s
 Address = %s/32
@@ -811,7 +830,7 @@ PublicKey = %s
 AllowedIPs = 0.0.0.0/0
 Endpoint = 127.0.0.1:%s
 PersistentKeepalive = %d`,
-		clientPrivate, clientIP, dns, wgMTU,
+		clientPrivate, clientIP, configDNS, wgMTU,
 		serverPublic, clientPort, keepalive,
 	)
 }
@@ -948,6 +967,7 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 		clientPort := "9000"
 		deviceID := "unknown"
 		password := ""
+		clientDNS := ""
 		if len(parts) > 0 {
 			clientPort = parts[0]
 		}
@@ -956,6 +976,9 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 		}
 		if len(parts) > 2 {
 			password = parts[2]
+		}
+		if len(parts) > 3 {
+			clientDNS = parts[3]
 		}
 
 		dbMutex.Lock()
@@ -1000,7 +1023,7 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 				}
 			}
 			if dev != nil {
-				clientConn.Write([]byte(buildClientConfig(keys.serverPublic, dev.PrivKey, dev.IP, clientPort)))
+				clientConn.Write([]byte(buildClientConfig(keys.serverPublic, dev.PrivKey, dev.IP, clientPort, clientDNS)))
 			} else {
 				clientConn.Write([]byte("NOCONF"))
 			}

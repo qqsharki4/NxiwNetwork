@@ -59,6 +59,7 @@ struct CoreArgs {
     split_tunnel: bool,
     no_dns: bool,
     sni: String,
+    dns: String,
     device_id: String,
     password: String,
     user_agent: String,
@@ -257,6 +258,7 @@ fn parse_core_args(args: &[String]) -> Result<CoreArgs> {
     let mut split_tunnel = false;
     let mut no_dns = false;
     let mut sni = String::new();
+    let mut dns = String::new();
     let mut device_id = "unknown".to_string();
     let mut password = String::new();
     let mut user_agent = "Mozilla/5.0".to_string();
@@ -276,6 +278,7 @@ fn parse_core_args(args: &[String]) -> Result<CoreArgs> {
             "-n" => workers = next_value(args, &mut index).parse().unwrap_or(workers),
             "-listen" => listen = next_value(args, &mut index),
             "-sni" => sni = next_value(args, &mut index),
+            "-dns" => dns = next_value(args, &mut index),
             "-device-id" => device_id = next_value(args, &mut index),
             "-password" => password = next_value(args, &mut index),
             "-user-agent" => user_agent = next_value(args, &mut index),
@@ -321,6 +324,7 @@ fn parse_core_args(args: &[String]) -> Result<CoreArgs> {
         split_tunnel,
         no_dns,
         sni,
+        dns: dns.trim().to_string(),
         device_id,
         password,
         user_agent,
@@ -1537,7 +1541,15 @@ async fn run_session(
     };
 
     if let Some(config_tx) = config_tx {
-        match request_config(dtls.clone(), local_port, &args.device_id, &args.password).await {
+        match request_config(
+            dtls.clone(),
+            local_port,
+            &args.device_id,
+            &args.password,
+            &args.dns,
+        )
+        .await
+        {
             Ok(Some(config)) => {
                 if !config_sent.swap(true, Ordering::Relaxed) {
                     let _ = config_tx.try_send(config);
@@ -1654,8 +1666,12 @@ async fn request_config(
     local_port: &str,
     device_id: &str,
     password: &str,
+    dns_override: &str,
 ) -> Result<Option<String>> {
-    let payload = format!("GETCONF:{local_port}|{device_id}|{password}");
+    let payload = format!(
+        "GETCONF:{local_port}|{device_id}|{password}|{}",
+        dns_override.trim()
+    );
     dtls.send(payload.as_bytes())
         .await
         .context("отправка GETCONF")?;
