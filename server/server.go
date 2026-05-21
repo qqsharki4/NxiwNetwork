@@ -962,82 +962,31 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 	firstPacket := buf[:n]
 	firstStr := string(firstPacket)
 
-	if strings.HasPrefix(firstStr, "GETCONF:") {
-		parts := strings.Split(strings.TrimSpace(strings.TrimPrefix(firstStr, "GETCONF:")), "|")
-		clientPort := "9000"
-		deviceID := "unknown"
-		password := ""
-		clientDNS := ""
-		if len(parts) > 0 {
-			clientPort = parts[0]
+	if _, ok := parseProtocolHello(firstPacket); ok {
+		clientConn.Write(buildProtocolHelloOK())
+		clientConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		n, err = clientConn.Read(buf)
+		if err != nil {
+			return
 		}
-		if len(parts) > 1 {
-			deviceID = parts[1]
-		}
-		if len(parts) > 2 {
-			password = parts[2]
-		}
-		if len(parts) > 3 {
-			clientDNS = parts[3]
-		}
+		clientConn.SetReadDeadline(time.Time{})
+		firstPacket = buf[:n]
+		firstStr = string(firstPacket)
+	}
 
-		dbMutex.Lock()
-
-		// Проверяем пароль
-		isMainPass := password != "" && password == db.MainPassword
-		entry, isGenPass := db.Passwords[password]
-		valid := isMainPass || (isGenPass && !isPasswordExpired(entry))
-
-		// Для сгенерированных паролей — проверяем привязку к устройству
-		if valid && isGenPass && entry.DeviceID != "" && entry.DeviceID != deviceID {
-			// Пароль уже привязан к другому устройству
-			clientConn.Write([]byte("DENIED:device_mismatch"))
-			log.Printf("[WG] Отказ: пароль %s привязан к %s, запрос от %s", password, entry.DeviceID, deviceID)
-			dbMutex.Unlock()
-		} else if valid {
-			connDeviceID = deviceID
-			connPassword = password
-			connIsMainPass = isMainPass
-
-			// Привязываем пароль к устройству при первом использовании
-			if isGenPass && entry.DeviceID == "" {
-				entry.DeviceID = deviceID
-				saveDB()
-				log.Printf("[WG] Пароль %s привязан к устройству %s", password, deviceID)
+	if configReq, ok := parseConfigRequest(firstPacket); ok {
+		result := handleConfigRequest(configReq, wgDev, keys)
+		if len(result.Response) > 0 {
+			if _, err := clientConn.Write(result.Response); err != nil {
+				return
 			}
-
-			dev, exists := db.Devices[deviceID]
-			if !exists {
-				dev = &ClientDevice{DeviceID: deviceID, IP: getNextIP()}
-				privB64, pubB64, keyErr := generateKeyPair()
-				if keyErr == nil && dev.IP != "" {
-					dev.PrivKey = privB64
-					dev.PubKey = pubB64
-					db.Devices[deviceID] = dev
-					saveDB()
-					pubHex, _ := b64ToHex(pubB64)
-					wgDev.IpcSet(fmt.Sprintf("public_key=%s\nallowed_ip=%s/32\n", pubHex, dev.IP))
-					log.Printf("[WG] Новое устройство %s (IP: %s)", deviceID, dev.IP)
-				} else {
-					dev = nil
-				}
-			}
-			if dev != nil {
-				clientConn.Write([]byte(buildClientConfig(keys.serverPublic, dev.PrivKey, dev.IP, clientPort, clientDNS)))
-			} else {
-				clientConn.Write([]byte("NOCONF"))
-			}
-			dbMutex.Unlock()
-		} else {
-			if isGenPass && isPasswordExpired(entry) {
-				clientConn.Write([]byte("DENIED:expired"))
-				log.Printf("[WG] Отказ: пароль %s истёк, от %s", password, deviceID)
-			} else {
-				clientConn.Write([]byte("DENIED:wrong_password"))
-				log.Printf("[WG] Отказ (неверный пароль) от %s", deviceID)
-			}
-			dbMutex.Unlock()
 		}
+		if !result.Continue {
+			return
+		}
+		connDeviceID = result.DeviceID
+		connPassword = result.Password
+		connIsMainPass = result.IsMainPass
 
 		clientConn.SetReadDeadline(time.Now().Add(5 * time.Minute))
 		n, err = clientConn.Read(buf)

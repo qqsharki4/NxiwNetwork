@@ -1668,10 +1668,7 @@ async fn request_config(
     password: &str,
     dns_override: &str,
 ) -> Result<Option<String>> {
-    let payload = format!(
-        "GETCONF:{local_port}|{device_id}|{password}|{}",
-        dns_override.trim()
-    );
+    let payload = build_config_request_payload(local_port, device_id, password, dns_override);
     dtls.send(payload.as_bytes())
         .await
         .context("отправка GETCONF")?;
@@ -1682,18 +1679,73 @@ async fn request_config(
         .context("чтение ответа конфига: timeout")?
         .context("чтение ответа конфига")?;
     let response = String::from_utf8_lossy(&buf[..n]).to_string();
+    parse_config_response(&response)
+}
+
+fn build_config_request_payload(
+    local_port: &str,
+    device_id: &str,
+    password: &str,
+    dns_override: &str,
+) -> String {
+    let dns_override = dns_override.trim();
+    if dns_override.is_empty() {
+        format!("GETCONF:{local_port}|{device_id}|{password}")
+    } else {
+        format!(
+            "GETCONF:{local_port}|{device_id}|{password}|{dns_override}|proto=2|caps=custom_dns"
+        )
+    }
+}
+
+fn parse_config_response(response: &str) -> Result<Option<String>> {
+    let response = response.trim();
     if response == "NOCONF" {
         return Ok(None);
     }
     if let Some(reason) = response.strip_prefix("DENIED:") {
-        match reason {
-            "wrong_password" => bail!("FATAL_AUTH: неверный пароль подключения"),
-            "expired" => bail!("FATAL_AUTH: срок действия пароля истёк"),
-            "device_mismatch" => bail!("FATAL_AUTH: пароль привязан к другому устройству"),
-            other => bail!("FATAL_AUTH: доступ запрещён ({other})"),
+        return denied_config_error(reason);
+    }
+    if response.starts_with('{') {
+        if let Ok(value) = serde_json::from_str::<Value>(response) {
+            match value.get("type").and_then(Value::as_str) {
+                Some("config") => {
+                    let config = value
+                        .get("config")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    return Ok(Some(config));
+                }
+                Some("no_config") => return Ok(None),
+                Some("error") => {
+                    if value.get("error").and_then(Value::as_str) == Some("denied") {
+                        let reason = value
+                            .get("reason")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown");
+                        return denied_config_error(reason);
+                    }
+                    let error = value
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    bail!("ответ сервера: {error}");
+                }
+                _ => {}
+            }
         }
     }
-    Ok(Some(response))
+    Ok(Some(response.to_string()))
+}
+
+fn denied_config_error<T>(reason: &str) -> Result<T> {
+    match reason {
+        "wrong_password" => bail!("FATAL_AUTH: неверный пароль подключения"),
+        "expired" => bail!("FATAL_AUTH: срок действия пароля истёк"),
+        "device_mismatch" => bail!("FATAL_AUTH: пароль привязан к другому устройству"),
+        other => bail!("FATAL_AUTH: доступ запрещён ({other})"),
+    }
 }
 
 async fn print_first_config(
