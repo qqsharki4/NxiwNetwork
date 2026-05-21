@@ -143,6 +143,7 @@ func main() {
 	splitTunnel := flag.Bool("split", false, "split tunneling")
 	sni := flag.String("sni", "", "SNI для DTLS")
 	dnsOverride := flag.String("dns", "", "DNS для WireGuard-конфига")
+	mtuOverride := flag.Int("mtu", 0, "MTU для WireGuard-конфига")
 	noDns := flag.Bool("nodns", false, "отключить DNS Яндекса")
 
 	appID := flag.String("vk-app-id", "6287487", "VK App ID")
@@ -204,6 +205,7 @@ func main() {
 		SecondaryHash: strings.TrimSpace(*secondaryHash),
 		Sni:           *sni,
 		Dns:           strings.TrimSpace(*dnsOverride),
+		Mtu:           *mtuOverride,
 	}
 
 	// Слушаем локально

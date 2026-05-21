@@ -283,7 +283,12 @@ object TunnelManager {
         }
         val caps = values["caps"]?.takeIf { it != "none" } ?: "none"
         val policy = values["policy"]?.let { " / policy=$it" } ?: ""
-        return "$request -> $response / $protocol / json=${if (json) "yes" else "no"} / dns=$dns / caps=$caps$policy"
+        val applied = buildList {
+            values["applied_dns"]?.takeIf { it.isNotBlank() }?.let { add("DNS $it") }
+            values["applied_mtu"]?.takeIf { it.isNotBlank() }?.let { add("MTU $it") }
+        }.joinToString(", ")
+        val appliedText = if (applied.isNotEmpty()) " / applied=$applied" else ""
+        return "$request -> $response / $protocol / json=${if (json) "yes" else "no"} / dns=$dns / caps=$caps$policy$appliedText"
     }
 
     fun start(context: Context, params: TunnelParams, isSwitching: Boolean = false) {
@@ -374,6 +379,11 @@ object TunnelManager {
                 if (dnsOverride.isNotEmpty()) {
                     cmd.add("-dns")
                     cmd.add(dnsOverride)
+                }
+                val mtuOverride = settingsStore.customMtu.first()
+                if (mtuOverride > 0) {
+                    cmd.add("-mtu")
+                    cmd.add(mtuOverride.toString())
                 }
 
                 val androidId = android.provider.Settings.Secure.getString(context.contentResolver, android.provider.Settings.Secure.ANDROID_ID) ?: "unknown"

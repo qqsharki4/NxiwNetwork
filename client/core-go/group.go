@@ -466,6 +466,7 @@ type TurnParams struct {
 	SecondaryHash string
 	Sni           string
 	Dns           string
+	Mtu           int
 }
 
 // Unused import suppressor

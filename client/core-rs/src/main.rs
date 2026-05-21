@@ -61,6 +61,7 @@ struct CoreArgs {
     no_dns: bool,
     sni: String,
     dns: String,
+    mtu: u16,
     device_id: String,
     password: String,
     user_agent: String,
@@ -260,6 +261,7 @@ fn parse_core_args(args: &[String]) -> Result<CoreArgs> {
     let mut no_dns = false;
     let mut sni = String::new();
     let mut dns = String::new();
+    let mut mtu = 0u16;
     let mut device_id = "unknown".to_string();
     let mut password = String::new();
     let mut user_agent = "Mozilla/5.0".to_string();
@@ -280,6 +282,7 @@ fn parse_core_args(args: &[String]) -> Result<CoreArgs> {
             "-listen" => listen = next_value(args, &mut index),
             "-sni" => sni = next_value(args, &mut index),
             "-dns" => dns = next_value(args, &mut index),
+            "-mtu" => mtu = next_value(args, &mut index).parse().unwrap_or(0),
             "-device-id" => device_id = next_value(args, &mut index),
             "-password" => password = next_value(args, &mut index),
             "-user-agent" => user_agent = next_value(args, &mut index),
@@ -326,6 +329,7 @@ fn parse_core_args(args: &[String]) -> Result<CoreArgs> {
         no_dns,
         sni,
         dns: dns.trim().to_string(),
+        mtu,
         device_id,
         password,
         user_agent,
@@ -1548,6 +1552,7 @@ async fn run_session(
             &args.device_id,
             &args.password,
             &args.dns,
+            args.mtu,
         )
         .await
         {
@@ -1669,15 +1674,33 @@ async fn request_config(
     device_id: &str,
     password: &str,
     dns_override: &str,
+    mtu_override: u16,
 ) -> Result<Option<String>> {
     if !PROTOCOL_V2_DISABLED.load(Ordering::Relaxed) {
-        match request_config_v2(dtls.clone(), local_port, device_id, password, dns_override).await {
+        match request_config_v2(
+            dtls.clone(),
+            local_port,
+            device_id,
+            password,
+            dns_override,
+            mtu_override,
+        )
+        .await
+        {
             Ok(config) => return Ok(config),
             Err(err) if err.to_string().contains("RETRY_LEGACY") => return Err(err),
             Err(err) => return Err(err),
         }
     }
-    request_config_legacy(dtls, local_port, device_id, password, dns_override).await
+    request_config_legacy(
+        dtls,
+        local_port,
+        device_id,
+        password,
+        dns_override,
+        mtu_override,
+    )
+    .await
 }
 
 async fn request_config_v2(
@@ -1686,8 +1709,9 @@ async fn request_config_v2(
     device_id: &str,
     password: &str,
     dns_override: &str,
+    mtu_override: u16,
 ) -> Result<Option<String>> {
-    let hello = r#"{"type":"hello","protocol_min":1,"protocol_max":2,"capabilities":["custom_dns","wireguard_config"]}"#;
+    let hello = r#"{"type":"hello","proto":[1,2],"features":{"custom_dns":1,"custom_mtu":1,"node_policy":1}}"#;
     if let Err(err) = dtls.send(hello.as_bytes()).await {
         PROTOCOL_V2_DISABLED.store(true, Ordering::Relaxed);
         bail!("RETRY_LEGACY: отправка hello: {err}");
@@ -1711,17 +1735,19 @@ async fn request_config_v2(
         .as_ref()
         .and_then(|value| value.get("type").and_then(Value::as_str))
         == Some("hello_ok")
-        && hello_ok
-            .as_ref()
-            .and_then(|value| value.get("protocol").and_then(Value::as_i64))
-            .unwrap_or(0)
-            >= 2;
+        && hello_ok.as_ref().and_then(protocol_value).unwrap_or(0) >= 2;
     if !supported {
         PROTOCOL_V2_DISABLED.store(true, Ordering::Relaxed);
         bail!("RETRY_LEGACY: hello unsupported");
     }
 
-    let payload = build_json_config_request_payload(local_port, device_id, password, dns_override);
+    let payload = build_json_config_request_payload(
+        local_port,
+        device_id,
+        password,
+        dns_override,
+        mtu_override,
+    );
     dtls.send(payload.as_bytes())
         .await
         .context("отправка JSON get_config")?;
@@ -1747,9 +1773,15 @@ async fn request_config_legacy(
     device_id: &str,
     password: &str,
     dns_override: &str,
+    mtu_override: u16,
 ) -> Result<Option<String>> {
-    let (payload, request_mode) =
-        build_legacy_config_request_payload(local_port, device_id, password, dns_override);
+    let (payload, request_mode) = build_legacy_config_request_payload(
+        local_port,
+        device_id,
+        password,
+        dns_override,
+        mtu_override,
+    );
     dtls.send(payload.as_bytes())
         .await
         .context("отправка GETCONF")?;
@@ -1775,21 +1807,29 @@ fn build_legacy_config_request_payload(
     device_id: &str,
     password: &str,
     dns_override: &str,
+    mtu_override: u16,
 ) -> (String, &'static str) {
     let dns_override = dns_override.trim();
-    if dns_override.is_empty() {
-        (
+    if dns_override.is_empty() && mtu_override == 0 {
+        return (
             format!("GETCONF:{local_port}|{device_id}|{password}"),
             "legacy",
-        )
-    } else {
-        (
-            format!(
-                "GETCONF:{local_port}|{device_id}|{password}|{dns_override}|proto=2|caps=custom_dns"
-            ),
-            "extended_legacy",
-        )
+        );
     }
+    let mut fields = vec![
+        local_port.to_string(),
+        device_id.to_string(),
+        password.to_string(),
+        dns_override.to_string(),
+        "proto=2".to_string(),
+    ];
+    if !dns_override.is_empty() {
+        fields.push("caps=custom_dns".to_string());
+    }
+    if mtu_override > 0 {
+        fields.push(format!("mtu={mtu_override}"));
+    }
+    (format!("GETCONF:{}", fields.join("|")), "extended_legacy")
 }
 
 fn build_json_config_request_payload(
@@ -1797,18 +1837,30 @@ fn build_json_config_request_payload(
     device_id: &str,
     password: &str,
     dns_override: &str,
+    mtu_override: u16,
 ) -> String {
+    let mut options = serde_json::Map::new();
+    let dns = split_dns_values(dns_override);
+    if !dns.is_empty() {
+        options.insert("dns".to_string(), serde_json::json!(dns));
+    }
+    if mtu_override > 0 {
+        options.insert("mtu".to_string(), serde_json::json!(mtu_override));
+    }
     let mut payload = serde_json::json!({
         "type": "get_config",
-        "protocol": 2,
+        "proto": 2,
         "local_port": local_port,
         "device_id": device_id,
         "password": password,
-        "capabilities": ["custom_dns", "wireguard_config"]
+        "features": {
+            "custom_dns": 1,
+            "custom_mtu": 1,
+            "node_policy": 1
+        }
     });
-    let dns = split_dns_values(dns_override);
-    if !dns.is_empty() {
-        payload["dns"] = serde_json::json!(dns);
+    if !options.is_empty() {
+        payload["options"] = serde_json::Value::Object(options);
     }
     payload.to_string()
 }
@@ -1827,6 +1879,7 @@ fn parse_config_response(response: &str) -> Result<Option<String>> {
                 Some("config") => {
                     let config = value
                         .get("config")
+                        .or_else(|| value.get("wg"))
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string();
@@ -1865,6 +1918,8 @@ fn describe_config_protocol(
     let mut protocol = "legacy".to_string();
     let mut json_response = false;
     let mut caps = "unconfirmed".to_string();
+    let mut applied_dns = String::new();
+    let mut applied_mtu = 0i64;
 
     if response == "NOCONF" {
         response_mode = "no_config".to_string();
@@ -1879,11 +1934,13 @@ fn describe_config_protocol(
                 .unwrap_or("json")
                 .to_string();
             protocol = value
-                .get("protocol")
-                .and_then(Value::as_i64)
+                .as_object()
+                .and_then(|_| protocol_value(&value))
                 .map(|v| format!("v{v}"))
                 .unwrap_or_else(|| "json".to_string());
-            if let Some(capabilities) = value.get("capabilities").and_then(Value::as_array) {
+            if let Some(features) = value.get("features").and_then(Value::as_object) {
+                caps = describe_feature_set(features);
+            } else if let Some(capabilities) = value.get("capabilities").and_then(Value::as_array) {
                 let joined = capabilities
                     .iter()
                     .filter_map(Value::as_str)
@@ -1894,14 +1951,38 @@ fn describe_config_protocol(
                 }
             }
             if let Some(policy) = value.get("policy") {
-                if let Some(max_workers) = policy.get("max_workers").and_then(Value::as_i64) {
+                if let Some(workers) = policy
+                    .get("limits")
+                    .and_then(|limits| limits.get("workers"))
+                    .and_then(Value::as_i64)
+                {
                     let custom_dns = policy
-                        .get("custom_dns_allowed")
+                        .get("allow")
+                        .and_then(|allow| allow.get("custom_dns"))
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
-                    caps =
-                        format!("{caps} policy=max_workers:{max_workers},custom_dns:{custom_dns}");
+                    let custom_mtu = policy
+                        .get("allow")
+                        .and_then(|allow| allow.get("custom_mtu"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let mtu = policy
+                        .get("limits")
+                        .and_then(|limits| limits.get("mtu"))
+                        .map(describe_mtu_limit)
+                        .unwrap_or_else(|| "unknown".to_string());
+                    caps = format!(
+                        "{caps} policy=workers:{workers},custom_dns:{custom_dns},custom_mtu:{custom_mtu},mtu:{mtu}"
+                    );
                 }
+            }
+            if let Some(applied) = value.get("applied") {
+                applied_dns = applied
+                    .get("dns")
+                    .and_then(Value::as_str)
+                    .map(compact_protocol_value)
+                    .unwrap_or_default();
+                applied_mtu = applied.get("mtu").and_then(Value::as_i64).unwrap_or(0);
             }
         }
     }
@@ -1910,7 +1991,67 @@ fn describe_config_protocol(
         "request={request_mode} response={response_mode} protocol={protocol} json={} dns={} caps={caps}",
         if json_response { "true" } else { "false" },
         describe_config_dns(config.unwrap_or_default(), dns_override)
-    )
+    ) + &describe_applied_config(&applied_dns, applied_mtu)
+}
+
+fn protocol_value(value: &Value) -> Option<i64> {
+    value
+        .get("proto")
+        .and_then(Value::as_i64)
+        .or_else(|| value.get("protocol").and_then(Value::as_i64))
+}
+
+fn describe_feature_set(features: &serde_json::Map<String, Value>) -> String {
+    let mut values = features
+        .iter()
+        .filter_map(|(feature, version)| {
+            let version = version.as_i64()?;
+            if feature.trim().is_empty() || version <= 0 {
+                return None;
+            }
+            Some(format!("{feature}:{version}"))
+        })
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        "none".to_string()
+    } else {
+        values.sort();
+        values.join(",")
+    }
+}
+
+fn describe_mtu_limit(value: &Value) -> String {
+    let Some(values) = value.as_array() else {
+        return "unknown".to_string();
+    };
+    if values.len() < 2 {
+        return "unknown".to_string();
+    }
+    let min = values[0].as_i64().unwrap_or_default();
+    let max = values[1].as_i64().unwrap_or_default();
+    format!("{min}-{max}")
+}
+
+fn describe_applied_config(dns: &str, mtu: i64) -> String {
+    let mut values = Vec::new();
+    if !dns.is_empty() {
+        values.push(format!("applied_dns={dns}"));
+    }
+    if mtu > 0 {
+        values.push(format!("applied_mtu={mtu}"));
+    }
+    if values.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", values.join(" "))
+    }
+}
+
+fn compact_protocol_value(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>()
 }
 
 fn describe_config_dns(config: &str, dns_override: &str) -> &'static str {

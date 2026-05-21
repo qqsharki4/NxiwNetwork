@@ -4,41 +4,66 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
 )
 
 type configResponse struct {
-	Type         string         `json:"type"`
-	Protocol     int            `json:"protocol"`
-	Config       string         `json:"config"`
-	Error        string         `json:"error"`
-	Reason       string         `json:"reason"`
-	Capabilities []string       `json:"capabilities"`
-	Policy       protocolPolicy `json:"policy"`
+	Type         string          `json:"type"`
+	Proto        int             `json:"proto"`
+	Protocol     int             `json:"protocol"`
+	Config       string          `json:"config"`
+	WG           string          `json:"wg"`
+	Error        string          `json:"error"`
+	Reason       string          `json:"reason"`
+	Features     map[string]int  `json:"features"`
+	Capabilities []string        `json:"capabilities"`
+	Policy       protocolPolicy  `json:"policy"`
+	Applied      protocolApplied `json:"applied"`
 }
 
 type protocolHelloOK struct {
-	Type         string         `json:"type"`
-	Protocol     int            `json:"protocol"`
-	Server       string         `json:"server"`
-	Capabilities []string       `json:"capabilities"`
-	Policy       protocolPolicy `json:"policy"`
+	Type     string         `json:"type"`
+	Proto    int            `json:"proto"`
+	Protocol int            `json:"protocol"`
+	Features map[string]int `json:"features"`
+	Policy   protocolPolicy `json:"policy"`
 }
 
 type protocolPolicy struct {
-	MaxWorkers       int      `json:"max_workers"`
-	CustomDNSAllowed bool     `json:"custom_dns_allowed"`
-	Transports       []string `json:"transports"`
+	Default protocolPolicyDefault `json:"default"`
+	Allow   protocolPolicyAllow   `json:"allow"`
+	Limits  protocolPolicyLimits  `json:"limits"`
+}
+
+type protocolPolicyDefault struct {
+	DNS string `json:"dns"`
+	MTU int    `json:"mtu"`
+}
+
+type protocolPolicyAllow struct {
+	CustomDNS bool `json:"custom_dns"`
+	CustomMTU bool `json:"custom_mtu"`
+}
+
+type protocolPolicyLimits struct {
+	Workers int   `json:"workers"`
+	MTU     []int `json:"mtu"`
+}
+
+type protocolApplied struct {
+	DNS string `json:"dns"`
+	MTU int    `json:"mtu"`
 }
 
 var protocolV2Disabled atomic.Bool
 
 // RequestConfig запрашивает WireGuard конфиг через DTLS-соединение.
-func RequestConfig(conn net.Conn, localPort, deviceID, password, dnsOverride string) (string, error) {
+func RequestConfig(conn net.Conn, localPort, deviceID, password, dnsOverride string, mtuOverride int) (string, error) {
 	if !protocolV2Disabled.Load() {
-		config, err := requestConfigV2(conn, localPort, deviceID, password, dnsOverride)
+		config, err := requestConfigV2(conn, localPort, deviceID, password, dnsOverride, mtuOverride)
 		if err == nil {
 			return config, nil
 		}
@@ -47,11 +72,11 @@ func RequestConfig(conn net.Conn, localPort, deviceID, password, dnsOverride str
 		}
 		return "", err
 	}
-	return requestConfigLegacy(conn, localPort, deviceID, password, dnsOverride)
+	return requestConfigLegacy(conn, localPort, deviceID, password, dnsOverride, mtuOverride)
 }
 
-func requestConfigV2(conn net.Conn, localPort, deviceID, password, dnsOverride string) (string, error) {
-	hello := `{"type":"hello","protocol_min":1,"protocol_max":2,"capabilities":["custom_dns","wireguard_config"]}`
+func requestConfigV2(conn net.Conn, localPort, deviceID, password, dnsOverride string, mtuOverride int) (string, error) {
+	hello := `{"type":"hello","proto":[1,2],"features":{"custom_dns":1,"custom_mtu":1,"node_policy":1}}`
 	if _, err := conn.Write([]byte(hello)); err != nil {
 		protocolV2Disabled.Store(true)
 		return "", fmt.Errorf("RETRY_LEGACY: отправка hello: %w", err)
@@ -70,12 +95,12 @@ func requestConfigV2(conn net.Conn, localPort, deviceID, password, dnsOverride s
 	}
 
 	var helloOK protocolHelloOK
-	if err := json.Unmarshal(b[:n], &helloOK); err != nil || helloOK.Type != "hello_ok" || helloOK.Protocol < 2 {
+	if err := json.Unmarshal(b[:n], &helloOK); err != nil || helloOK.Type != "hello_ok" || responseProto(helloOK.Proto, helloOK.Protocol) < 2 {
 		protocolV2Disabled.Store(true)
 		return "", fmt.Errorf("RETRY_LEGACY: hello unsupported")
 	}
 
-	payload := buildJSONConfigRequestPayload(localPort, deviceID, password, dnsOverride)
+	payload := buildJSONConfigRequestPayload(localPort, deviceID, password, dnsOverride, mtuOverride)
 	if _, err := conn.Write([]byte(payload)); err != nil {
 		return "", fmt.Errorf("отправка JSON get_config: %w", err)
 	}
@@ -97,8 +122,8 @@ func requestConfigV2(conn net.Conn, localPort, deviceID, password, dnsOverride s
 	return config, err
 }
 
-func requestConfigLegacy(conn net.Conn, localPort, deviceID, password, dnsOverride string) (string, error) {
-	payload, requestMode := buildLegacyConfigRequestPayload(localPort, deviceID, password, dnsOverride)
+func requestConfigLegacy(conn net.Conn, localPort, deviceID, password, dnsOverride string, mtuOverride int) (string, error) {
+	payload, requestMode := buildLegacyConfigRequestPayload(localPort, deviceID, password, dnsOverride, mtuOverride)
 	if _, err := conn.Write([]byte(payload)); err != nil {
 		return "", fmt.Errorf("отправка GETCONF: %w", err)
 	}
@@ -121,27 +146,45 @@ func requestConfigLegacy(conn net.Conn, localPort, deviceID, password, dnsOverri
 	return config, err
 }
 
-func buildLegacyConfigRequestPayload(localPort, deviceID, password, dnsOverride string) (string, string) {
+func buildLegacyConfigRequestPayload(localPort, deviceID, password, dnsOverride string, mtuOverride int) (string, string) {
 	fields := []string{localPort, deviceID, password}
 	dnsOverride = strings.TrimSpace(dnsOverride)
 	if dnsOverride != "" {
 		fields = append(fields, dnsOverride, "proto=2", "caps=custom_dns")
+	} else if mtuOverride > 0 {
+		fields = append(fields, "", "proto=2")
+	}
+	if mtuOverride > 0 {
+		fields = append(fields, fmt.Sprintf("mtu=%d", mtuOverride))
+	}
+	if len(fields) > 3 {
 		return "GETCONF:" + strings.Join(fields, "|"), "extended_legacy"
 	}
 	return "GETCONF:" + strings.Join(fields, "|"), "legacy"
 }
 
-func buildJSONConfigRequestPayload(localPort, deviceID, password, dnsOverride string) string {
-	req := map[string]interface{}{
-		"type":         "get_config",
-		"protocol":     2,
-		"local_port":   localPort,
-		"device_id":    deviceID,
-		"password":     password,
-		"capabilities": []string{"custom_dns", "wireguard_config"},
-	}
+func buildJSONConfigRequestPayload(localPort, deviceID, password, dnsOverride string, mtuOverride int) string {
+	options := map[string]interface{}{}
 	if dns := splitDNSValues(dnsOverride); len(dns) > 0 {
-		req["dns"] = dns
+		options["dns"] = dns
+	}
+	if mtuOverride > 0 {
+		options["mtu"] = mtuOverride
+	}
+	req := map[string]interface{}{
+		"type":       "get_config",
+		"proto":      2,
+		"local_port": localPort,
+		"device_id":  deviceID,
+		"password":   password,
+		"features": map[string]int{
+			"custom_dns":  1,
+			"custom_mtu":  1,
+			"node_policy": 1,
+		},
+	}
+	if len(options) > 0 {
+		req["options"] = options
 	}
 	payload, err := json.Marshal(req)
 	if err != nil {
@@ -163,6 +206,9 @@ func parseConfigResponse(resp string) (string, error) {
 		if err := json.Unmarshal([]byte(resp), &parsed); err == nil {
 			switch parsed.Type {
 			case "config":
+				if parsed.Config == "" {
+					return parsed.WG, nil
+				}
 				return parsed.Config, nil
 			case "no_config":
 				return "", nil
@@ -182,6 +228,8 @@ func describeConfigProtocol(requestMode, resp, config, dnsOverride string) strin
 	protocol := "legacy"
 	jsonResponse := false
 	caps := "unconfirmed"
+	appliedDNS := ""
+	appliedMTU := 0
 
 	trimmed := strings.TrimSpace(resp)
 	if trimmed == "NOCONF" {
@@ -193,21 +241,31 @@ func describeConfigProtocol(requestMode, resp, config, dnsOverride string) strin
 		if err := json.Unmarshal([]byte(trimmed), &parsed); err == nil {
 			jsonResponse = true
 			response = parsed.Type
-			if parsed.Protocol > 0 {
-				protocol = fmt.Sprintf("v%d", parsed.Protocol)
+			if responseProto(parsed.Proto, parsed.Protocol) > 0 {
+				protocol = fmt.Sprintf("v%d", responseProto(parsed.Proto, parsed.Protocol))
 			} else {
 				protocol = "json"
 			}
-			if len(parsed.Capabilities) > 0 {
+			if len(parsed.Features) > 0 {
+				caps = describeFeatureSet(parsed.Features)
+			} else if len(parsed.Capabilities) > 0 {
 				caps = strings.Join(parsed.Capabilities, ",")
 			}
-			if parsed.Policy.MaxWorkers > 0 {
-				caps = fmt.Sprintf("%s policy=max_workers:%d,custom_dns:%t", caps, parsed.Policy.MaxWorkers, parsed.Policy.CustomDNSAllowed)
+			if parsed.Policy.Limits.Workers > 0 {
+				caps = fmt.Sprintf("%s policy=workers:%d,custom_dns:%t,custom_mtu:%t,mtu:%s",
+					caps,
+					parsed.Policy.Limits.Workers,
+					parsed.Policy.Allow.CustomDNS,
+					parsed.Policy.Allow.CustomMTU,
+					describeMTULimit(parsed.Policy.Limits.MTU),
+				)
 			}
+			appliedDNS = parsed.Applied.DNS
+			appliedMTU = parsed.Applied.MTU
 		}
 	}
 
-	return fmt.Sprintf(
+	return strings.TrimSpace(fmt.Sprintf(
 		"request=%s response=%s protocol=%s json=%t dns=%s caps=%s",
 		requestMode,
 		response,
@@ -215,7 +273,60 @@ func describeConfigProtocol(requestMode, resp, config, dnsOverride string) strin
 		jsonResponse,
 		describeConfigDNS(config, dnsOverride),
 		caps,
-	)
+	) + describeAppliedConfig(appliedDNS, appliedMTU))
+}
+
+func responseProto(proto, legacyProtocol int) int {
+	if proto > 0 {
+		return proto
+	}
+	return legacyProtocol
+}
+
+func describeFeatureSet(features map[string]int) string {
+	values := make([]string, 0, len(features))
+	for feature, version := range features {
+		if strings.TrimSpace(feature) == "" || version <= 0 {
+			continue
+		}
+		values = append(values, fmt.Sprintf("%s:%d", feature, version))
+	}
+	if len(values) == 0 {
+		return "none"
+	}
+	sort.Strings(values)
+	return strings.Join(values, ",")
+}
+
+func describeMTULimit(values []int) string {
+	if len(values) >= 2 {
+		return fmt.Sprintf("%d-%d", values[0], values[1])
+	}
+	return "unknown"
+}
+
+func describeAppliedConfig(dns string, mtu int) string {
+	parts := make([]string, 0, 2)
+	dns = compactProtocolValue(dns)
+	if dns != "" {
+		parts = append(parts, "applied_dns="+dns)
+	}
+	if mtu > 0 {
+		parts = append(parts, fmt.Sprintf("applied_mtu=%d", mtu))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " " + strings.Join(parts, " ")
+}
+
+func compactProtocolValue(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.ReplaceAll(value, " ", "")
+	value = strings.ReplaceAll(value, "\t", "")
+	value = strings.ReplaceAll(value, "\n", "")
+	value = strings.ReplaceAll(value, "\r", "")
+	return value
 }
 
 func describeConfigDNS(config, dnsOverride string) string {
