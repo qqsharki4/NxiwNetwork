@@ -14,10 +14,32 @@ const (
 	protocolFeatureCustomMTU       = "custom_mtu"
 	protocolFeatureNodePolicy      = "node_policy"
 	protocolFeatureWireGuardConfig = "wireguard_config"
-	protocolMaxWorkers             = 72
-	protocolMinMTU                 = 1280
-	protocolMaxMTU                 = 1500
+	defaultPolicyDNS               = dns
+	defaultPolicyMTU               = wgMTU
+	defaultProtocolMaxWorkers      = 72
+	defaultProtocolMinMTU          = 1280
+	defaultProtocolMaxMTU          = 1500
 )
+
+var nodePolicy = protocolPolicyRuntime{
+	DefaultDNS:     defaultPolicyDNS,
+	DefaultMTU:     defaultPolicyMTU,
+	AllowCustomDNS: true,
+	AllowCustomMTU: true,
+	MaxWorkers:     defaultProtocolMaxWorkers,
+	MinMTU:         defaultProtocolMinMTU,
+	MaxMTU:         defaultProtocolMaxMTU,
+}
+
+type protocolPolicyRuntime struct {
+	DefaultDNS     string
+	DefaultMTU     int
+	AllowCustomDNS bool
+	AllowCustomMTU bool
+	MaxWorkers     int
+	MinMTU         int
+	MaxMTU         int
+}
 
 type protocolResponseMode int
 
@@ -134,7 +156,13 @@ func buildProtocolHelloOK() []byte {
 		Policy:   buildProtocolPolicy(),
 	})
 	if err != nil {
-		return []byte(`{"type":"hello_ok","proto":2,"features":{"custom_dns":1,"custom_mtu":1,"node_policy":1},"policy":{"default":{"dns":"1.1.1.1","mtu":1280},"allow":{"custom_dns":true,"custom_mtu":true},"limits":{"workers":72,"mtu":[1280,1500]}}}`)
+		return []byte(`{"type":"hello_ok","proto":2,"features":{"custom_dns":1,"custom_mtu":1,"node_policy":1},"policy":{"default":{"dns":` +
+			strconv.Quote(nodePolicy.DefaultDNS) +
+			`,"mtu":` + strconv.Itoa(nodePolicy.DefaultMTU) +
+			`},"allow":{"custom_dns":` + strconv.FormatBool(nodePolicy.AllowCustomDNS) +
+			`,"custom_mtu":` + strconv.FormatBool(nodePolicy.AllowCustomMTU) +
+			`},"limits":{"workers":` + strconv.Itoa(nodePolicy.MaxWorkers) +
+			`,"mtu":[` + strconv.Itoa(nodePolicy.MinMTU) + `,` + strconv.Itoa(nodePolicy.MaxMTU) + `]}}}`)
 	}
 	return payload
 }
@@ -330,16 +358,16 @@ func buildProtocolFeatures() protocolFeatures {
 func buildProtocolPolicy() protocolPolicy {
 	return protocolPolicy{
 		Default: protocolPolicyDefault{
-			DNS: dns,
-			MTU: wgMTU,
+			DNS: nodePolicy.DefaultDNS,
+			MTU: nodePolicy.DefaultMTU,
 		},
 		Allow: protocolPolicyAllow{
-			CustomDNS: true,
-			CustomMTU: true,
+			CustomDNS: nodePolicy.AllowCustomDNS,
+			CustomMTU: nodePolicy.AllowCustomMTU,
 		},
 		Limits: protocolPolicyLimits{
-			Workers: protocolMaxWorkers,
-			MTU:     [2]int{protocolMinMTU, protocolMaxMTU},
+			Workers: nodePolicy.MaxWorkers,
+			MTU:     [2]int{nodePolicy.MinMTU, nodePolicy.MaxMTU},
 		},
 	}
 }
@@ -375,10 +403,55 @@ func decodeProtocolDNS(raw json.RawMessage) string {
 }
 
 func normalizeClientMTU(raw int) int {
-	if raw >= protocolMinMTU && raw <= protocolMaxMTU {
+	if !nodePolicy.AllowCustomMTU {
+		return nodePolicy.DefaultMTU
+	}
+	if raw >= nodePolicy.MinMTU && raw <= nodePolicy.MaxMTU {
 		return raw
 	}
-	return wgMTU
+	if raw > 0 && raw < nodePolicy.MinMTU {
+		return nodePolicy.MinMTU
+	}
+	if raw > nodePolicy.MaxMTU {
+		return nodePolicy.MaxMTU
+	}
+	return nodePolicy.DefaultMTU
+}
+
+func configureNodePolicy(defaultDNS string, defaultMTU int, allowCustomDNS, allowCustomMTU bool, maxWorkers, minMTU, maxMTU int) {
+	defaultDNS = strings.TrimSpace(defaultDNS)
+	if normalizedDNS := normalizeDNSList(defaultDNS); normalizedDNS != "" {
+		defaultDNS = normalizedDNS
+	} else {
+		defaultDNS = defaultPolicyDNS
+	}
+	if defaultMTU < minMTU || defaultMTU > maxMTU {
+		defaultMTU = defaultPolicyMTU
+	}
+	if maxWorkers < 1 {
+		maxWorkers = defaultProtocolMaxWorkers
+	}
+	if minMTU < 576 {
+		minMTU = defaultProtocolMinMTU
+	}
+	if maxMTU < minMTU {
+		maxMTU = minMTU
+	}
+	if defaultMTU < minMTU {
+		defaultMTU = minMTU
+	}
+	if defaultMTU > maxMTU {
+		defaultMTU = maxMTU
+	}
+	nodePolicy = protocolPolicyRuntime{
+		DefaultDNS:     defaultDNS,
+		DefaultMTU:     defaultMTU,
+		AllowCustomDNS: allowCustomDNS,
+		AllowCustomMTU: allowCustomMTU,
+		MaxWorkers:     maxWorkers,
+		MinMTU:         minMTU,
+		MaxMTU:         maxMTU,
+	}
 }
 
 func normalizeClientPort(raw string) string {

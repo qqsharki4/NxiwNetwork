@@ -178,17 +178,28 @@ func configureInterface(ifaceName string) error {
 }
 
 func normalizeClientDNS(raw string) string {
+	if !nodePolicy.AllowCustomDNS {
+		return nodePolicy.DefaultDNS
+	}
+	normalized := normalizeDNSList(raw)
+	if normalized == "" {
+		return nodePolicy.DefaultDNS
+	}
+	return normalized
+}
+
+func normalizeDNSList(raw string) string {
 	parts := strings.FieldsFunc(strings.TrimSpace(raw), func(r rune) bool {
 		return r == ',' || r == ';' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
 	})
 	if len(parts) == 0 {
-		return dns
+		return ""
 	}
 	servers := make([]string, 0, len(parts))
 	for _, part := range parts {
 		ip := net.ParseIP(strings.TrimSpace(part))
 		if ip == nil {
-			return dns
+			return ""
 		}
 		servers = append(servers, ip.String())
 	}

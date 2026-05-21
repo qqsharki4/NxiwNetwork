@@ -36,7 +36,23 @@ func main() {
 	mainPass := flag.String("password", "", "пароль владельца")
 	adminID := flag.String("admin", "", "Telegram Admin ID")
 	botToken := flag.String("bot-token", "", "Telegram Bot Token")
+	policyDefaultDNS := flag.String("policy-default-dns", defaultPolicyDNS, "DNS по умолчанию для клиентского WireGuard-конфига")
+	policyDefaultMTU := flag.Int("policy-default-mtu", defaultPolicyMTU, "MTU по умолчанию для клиентского WireGuard-конфига")
+	policyAllowCustomDNS := flag.Bool("policy-allow-custom-dns", true, "разрешить клиенту передавать custom DNS")
+	policyAllowCustomMTU := flag.Bool("policy-allow-custom-mtu", true, "разрешить клиенту передавать custom MTU")
+	policyMaxWorkers := flag.Int("policy-max-workers", defaultProtocolMaxWorkers, "максимум воркеров, который нода сообщает клиенту")
+	policyMinMTU := flag.Int("policy-mtu-min", defaultProtocolMinMTU, "минимальный custom MTU")
+	policyMaxMTU := flag.Int("policy-mtu-max", defaultProtocolMaxMTU, "максимальный custom MTU")
 	flag.Parse()
+	configureNodePolicy(
+		*policyDefaultDNS,
+		*policyDefaultMTU,
+		*policyAllowCustomDNS,
+		*policyAllowCustomMTU,
+		*policyMaxWorkers,
+		*policyMinMTU,
+		*policyMaxMTU,
+	)
 
 	_ = wgPort // WG порт задаётся через internalWGPort (56001)
 
@@ -44,6 +60,15 @@ func main() {
 	log.Println("══════════════════════════════════════════")
 	log.Println("   NxiwNetwork Server v2 (Multi-User)")
 	log.Println("══════════════════════════════════════════")
+	log.Printf("[POLICY] DNS=%s MTU=%d range=%d-%d custom_dns=%t custom_mtu=%t max_workers=%d",
+		nodePolicy.DefaultDNS,
+		nodePolicy.DefaultMTU,
+		nodePolicy.MinMTU,
+		nodePolicy.MaxMTU,
+		nodePolicy.AllowCustomDNS,
+		nodePolicy.AllowCustomMTU,
+		nodePolicy.MaxWorkers,
+	)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
