@@ -59,6 +59,7 @@ func statsLoop(ctx context.Context, configDir string) {
 			dbMutex.Lock()
 			numPasswords := len(db.Passwords)
 			numDevices := len(db.Devices)
+			saveDB()
 			dbMutex.Unlock()
 
 			uptimeStr := formatUptime(uptime)

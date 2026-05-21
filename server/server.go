@@ -58,6 +58,7 @@ func main() {
 	}()
 
 	initDB(*configDir, *mainPass, *adminID, *botToken)
+	defer closeDB()
 
 	keys, err := loadOrGenerateKeys(*configDir)
 	if err != nil {
