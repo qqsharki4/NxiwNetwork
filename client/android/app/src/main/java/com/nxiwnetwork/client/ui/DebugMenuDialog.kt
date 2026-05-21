@@ -81,6 +81,7 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
     val suppressBatteryOptimizationPrompt by settingsStore.suppressBatteryOptimizationPrompt.collectAsStateWithLifecycle(false)
     val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
     val activeBackend by TunnelManager.activeCoreBackend.collectAsStateWithLifecycle()
+    val coreProtocolMode by TunnelManager.coreProtocolMode.collectAsStateWithLifecycle()
     val activeWorkers by TunnelManager.activeWorkers.collectAsStateWithLifecycle()
     val stats by TunnelManager.stats.collectAsStateWithLifecycle()
     val pingMs by TunnelManager.currentPingMs.collectAsStateWithLifecycle()
@@ -138,6 +139,7 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
         dnsLabel,
         tunnelRunning,
         activeBackend,
+        coreProtocolMode,
         activeWorkers,
         stats,
         pingMs,
@@ -169,6 +171,7 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
             deviceName = deviceName,
             selectedBackend = selectedBackend.label,
             activeBackend = activeBackend?.label ?: "нет",
+            coreProtocolMode = coreProtocolMode,
             protocol = protocol.uppercase(),
             workers = workers,
             keepaliveSeconds = keepaliveSeconds,
@@ -234,6 +237,7 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
                     DebugInfoRow("Android", "${Build.VERSION.RELEASE} / SDK ${Build.VERSION.SDK_INT}")
                     DebugInfoRow("Туннель", if (tunnelRunning) "запущен" else "остановлен")
                     DebugInfoRow("Ядро", "${selectedBackend.label} выбрано / ${activeBackend?.label ?: "нет"} активно")
+                    DebugInfoRow("Протокол ноды", coreProtocolMode)
                     DebugInfoRow("Транспорт", protocol.uppercase())
                     DebugInfoRow("Потоки", "$workers настроено / $activeWorkers активно")
                     DebugInfoRow("Keepalive", "$keepaliveSeconds сек")
@@ -799,6 +803,7 @@ private fun buildDebugSnapshot(
     deviceName: String,
     selectedBackend: String,
     activeBackend: String,
+    coreProtocolMode: String,
     protocol: String,
     workers: Int,
     keepaliveSeconds: Int,
@@ -836,6 +841,7 @@ private fun buildDebugSnapshot(
     appendLine("Android: ${Build.VERSION.RELEASE} / SDK ${Build.VERSION.SDK_INT}")
     appendLine("Tunnel: ${if (tunnelRunning) "running" else "stopped"}")
     appendLine("Core: selected=$selectedBackend active=$activeBackend")
+    appendLine("Node protocol: $coreProtocolMode")
     appendLine("Transport: $protocol")
     appendLine("Workers: configured=$workers active=$activeWorkers")
     appendLine("Keepalive: ${keepaliveSeconds}s")

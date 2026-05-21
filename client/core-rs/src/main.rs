@@ -1668,7 +1668,8 @@ async fn request_config(
     password: &str,
     dns_override: &str,
 ) -> Result<Option<String>> {
-    let payload = build_config_request_payload(local_port, device_id, password, dns_override);
+    let (payload, request_mode) =
+        build_config_request_payload(local_port, device_id, password, dns_override);
     dtls.send(payload.as_bytes())
         .await
         .context("отправка GETCONF")?;
@@ -1679,7 +1680,14 @@ async fn request_config(
         .context("чтение ответа конфига: timeout")?
         .context("чтение ответа конфига")?;
     let response = String::from_utf8_lossy(&buf[..n]).to_string();
-    parse_config_response(&response)
+    let config = parse_config_response(&response);
+    if let Ok(config) = &config {
+        println!(
+            "[PROTO] {}",
+            describe_config_protocol(request_mode, &response, config.as_deref(), dns_override)
+        );
+    }
+    config
 }
 
 fn build_config_request_payload(
@@ -1687,13 +1695,19 @@ fn build_config_request_payload(
     device_id: &str,
     password: &str,
     dns_override: &str,
-) -> String {
+) -> (String, &'static str) {
     let dns_override = dns_override.trim();
     if dns_override.is_empty() {
-        format!("GETCONF:{local_port}|{device_id}|{password}")
+        (
+            format!("GETCONF:{local_port}|{device_id}|{password}"),
+            "legacy",
+        )
     } else {
-        format!(
-            "GETCONF:{local_port}|{device_id}|{password}|{dns_override}|proto=2|caps=custom_dns"
+        (
+            format!(
+                "GETCONF:{local_port}|{device_id}|{password}|{dns_override}|proto=2|caps=custom_dns"
+            ),
+            "extended_legacy",
         )
     }
 }
@@ -1737,6 +1751,94 @@ fn parse_config_response(response: &str) -> Result<Option<String>> {
         }
     }
     Ok(Some(response.to_string()))
+}
+
+fn describe_config_protocol(
+    request_mode: &str,
+    response: &str,
+    config: Option<&str>,
+    dns_override: &str,
+) -> String {
+    let response = response.trim();
+    let mut response_mode = "raw_config".to_string();
+    let mut protocol = "legacy".to_string();
+    let mut json_response = false;
+    let mut caps = "unconfirmed".to_string();
+
+    if response == "NOCONF" {
+        response_mode = "no_config".to_string();
+    } else if response.starts_with("DENIED:") {
+        response_mode = "denied".to_string();
+    } else if response.starts_with('{') {
+        if let Ok(value) = serde_json::from_str::<Value>(response) {
+            json_response = true;
+            response_mode = value
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("json")
+                .to_string();
+            protocol = value
+                .get("protocol")
+                .and_then(Value::as_i64)
+                .map(|v| format!("v{v}"))
+                .unwrap_or_else(|| "json".to_string());
+            if let Some(capabilities) = value.get("capabilities").and_then(Value::as_array) {
+                let joined = capabilities
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                if !joined.is_empty() {
+                    caps = joined;
+                }
+            }
+        }
+    }
+
+    format!(
+        "request={request_mode} response={response_mode} protocol={protocol} json={} dns={} caps={caps}",
+        if json_response { "true" } else { "false" },
+        describe_config_dns(config.unwrap_or_default(), dns_override)
+    )
+}
+
+fn describe_config_dns(config: &str, dns_override: &str) -> &'static str {
+    let requested = split_dns_values(dns_override);
+    if requested.is_empty() {
+        return "not_requested";
+    }
+    let configured = split_dns_values(&extract_config_dns(config));
+    if configured.is_empty() {
+        return "missing";
+    }
+    if requested
+        .iter()
+        .all(|requested_dns| configured.iter().any(|got| got == requested_dns))
+    {
+        "matches_config"
+    } else {
+        "not_in_config"
+    }
+}
+
+fn extract_config_dns(config: &str) -> String {
+    for line in config.lines() {
+        let line = line.trim();
+        if line.to_ascii_lowercase().starts_with("dns") {
+            if let Some((_, value)) = line.split_once('=') {
+                return value.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+fn split_dns_values(raw: &str) -> Vec<String> {
+    raw.split(|c: char| c == ',' || c == ';' || c.is_whitespace())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn denied_config_error<T>(reason: &str) -> Result<T> {

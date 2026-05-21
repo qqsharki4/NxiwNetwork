@@ -79,6 +79,7 @@ object TunnelManager {
     val stats = MutableStateFlow("Ожидание данных...")
     val activeWorkers = MutableStateFlow(0)
     val activeCoreBackend = MutableStateFlow<CoreBackend?>(null)
+    val coreProtocolMode = MutableStateFlow("нет данных")
     val coreProcessPid = MutableStateFlow<Int?>(null)
     val tunnelStartedAtElapsedMs = MutableStateFlow<Long?>(null)
     
@@ -210,6 +211,7 @@ object TunnelManager {
 
     private fun resetCoreMetrics() {
         coreTrafficMetrics.value = CoreTrafficMetrics()
+        activeWorkers.value = 0
         currentUploadSpeedBytes.value = 0L
         currentDownloadSpeedBytes.value = 0L
         currentSpeedBytes.value = 0L
@@ -248,6 +250,39 @@ object TunnelManager {
             downPacketsPerSecond = values["down_pps"] ?: 0L,
             droppedPackets = values["drops"] ?: 0L
         )
+    }
+
+    private fun formatCoreProtocolMode(message: String): String {
+        val values = Regex("""([a-z_]+)=([^ ]+)""")
+            .findAll(message)
+            .associate { it.groupValues[1] to it.groupValues[2] }
+
+        val request = when (values["request"] ?: values["mode"]) {
+            "legacy" -> "Legacy GETCONF"
+            "extended_legacy" -> "Extended GETCONF"
+            "json" -> "JSON"
+            else -> values["request"] ?: values["mode"] ?: "unknown"
+        }
+        val response = when (values["response"]) {
+            "raw_config" -> "raw config"
+            "config" -> "JSON config"
+            "no_config" -> "no config"
+            "denied", "error" -> "denied"
+            else -> values["response"] ?: "unknown"
+        }
+        val protocol = values["protocol"] ?: values["proto"]?.let { "v$it" } ?: "legacy?"
+        val json = values["json"] == "true"
+        val dns = when (values["dns"]) {
+            "not_requested" -> "not requested"
+            "matches_config" -> "matches config"
+            "not_in_config" -> "ignored"
+            "missing" -> "missing"
+            "true" -> "requested"
+            "false" -> "not requested"
+            else -> values["dns"] ?: "unknown"
+        }
+        val caps = values["caps"]?.takeIf { it != "none" } ?: "none"
+        return "$request -> $response / $protocol / json=${if (json) "yes" else "no"} / dns=$dns / caps=$caps"
     }
 
     fun start(context: Context, params: TunnelParams, isSwitching: Boolean = false) {
@@ -374,6 +409,8 @@ object TunnelManager {
                 coreProcessPid.value = process?.safePid()
                 running.value = true
                 activeCoreBackend.value = backendResolution.active
+                coreProtocolMode.value = "ожидание handshake"
+                stats.value = "Ожидание данных..."
                 startRuntimeSettingsMonitor(settingsStore, totalWorkers)
                 updateWidgetState()
                 
@@ -386,6 +423,7 @@ object TunnelManager {
                 updateLog("critical_start_error", "Критическая ошибка запуска: ${e.message}", 99, true)
                 running.value = false
                 activeCoreBackend.value = null
+                coreProtocolMode.value = "нет данных"
                 updateWidgetState()
             }
         }
@@ -499,6 +537,12 @@ object TunnelManager {
                             uploadTrafficGraphPoints.value = List(30) { 0f }
                             downloadTrafficGraphPoints.value = List(30) { 0f }
                         }
+                        return@forEachLine
+                    }
+
+                    if (lineTrim.contains("[PROTO]")) {
+                        val msg = lineTrim.substringAfter("[PROTO]").trim()
+                        coreProtocolMode.value = formatCoreProtocolMode(msg)
                         return@forEachLine
                     }
 
@@ -629,8 +673,11 @@ object TunnelManager {
                 if (processRestartExpected) {
                     processRestartExpected = false
                 } else {
+                    resetCoreMetrics()
                     running.value = false
                     activeCoreBackend.value = null
+                    coreProtocolMode.value = "нет данных"
+                    stats.value = "Остановлено"
                     updateWidgetState()
                 }
                 processStopExpected = false
@@ -753,6 +800,7 @@ object TunnelManager {
         val proc = process
         process = null
         coreProcessPid.value = null
+        coreProtocolMode.value = if (keepRunning) "ожидание restart" else "нет данных"
         if (proc != null) {
             try { proc.destroy() } catch (_: Exception) {}
             try { proc.waitFor(500, java.util.concurrent.TimeUnit.MILLISECONDS) } catch (_: Exception) {}
@@ -764,6 +812,8 @@ object TunnelManager {
         if (!keepRunning) {
             running.value = false
             activeCoreBackend.value = null
+            coreProtocolMode.value = "нет данных"
+            stats.value = "Остановлено"
             tunnelStartedAtElapsedMs.value = null
             updateWidgetState()
         }
