@@ -195,8 +195,9 @@ func normalizeClientDNS(raw string) string {
 	return strings.Join(servers, ", ")
 }
 
-func buildClientConfig(serverPublic, clientPrivate, clientIP, clientPort, clientDNS string) string {
+func buildClientConfig(serverPublic, clientPrivate, clientIP, clientPort, clientDNS string, clientMTU int) string {
 	configDNS := normalizeClientDNS(clientDNS)
+	configMTU := normalizeClientMTU(clientMTU)
 	return fmt.Sprintf(`[Interface]
 PrivateKey = %s
 Address = %s/32
@@ -208,7 +209,7 @@ PublicKey = %s
 AllowedIPs = 0.0.0.0/0
 Endpoint = 127.0.0.1:%s
 PersistentKeepalive = %d`,
-		clientPrivate, clientIP, configDNS, wgMTU,
+		clientPrivate, clientIP, configDNS, configMTU,
 		serverPublic, clientPort, keepalive,
 	)
 }

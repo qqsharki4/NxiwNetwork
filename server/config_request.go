@@ -49,8 +49,13 @@ func handleConfigRequest(req configRequest, wgDev *device.Device, keys *wgKeys) 
 		log.Printf("[WG] Пароль %s привязан к устройству %s", req.Password, req.DeviceID)
 	}
 
+	applied := protocolApplied{
+		DNS: normalizeClientDNS(req.DNS),
+		MTU: normalizeClientMTU(req.MTU),
+	}
+
 	return configRequestResult{
-		Response:   buildConfigResponse(req, buildClientConfig(keys.serverPublic, dev.PrivKey, dev.IP, req.LocalPort, req.DNS)),
+		Response:   buildConfigResponse(req, buildClientConfig(keys.serverPublic, dev.PrivKey, dev.IP, req.LocalPort, applied.DNS, applied.MTU), applied),
 		Continue:   true,
 		DeviceID:   req.DeviceID,
 		Password:   req.Password,

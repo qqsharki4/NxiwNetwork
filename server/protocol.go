@@ -8,11 +8,15 @@ import (
 
 const (
 	nxiwProtocolVersion = 2
-	nxiwServerVersion   = "2"
 	defaultClientPort   = "9000"
 
 	protocolFeatureCustomDNS       = "custom_dns"
+	protocolFeatureCustomMTU       = "custom_mtu"
+	protocolFeatureNodePolicy      = "node_policy"
 	protocolFeatureWireGuardConfig = "wireguard_config"
+	protocolMaxWorkers             = 72
+	protocolMinMTU                 = 1280
+	protocolMaxMTU                 = 1500
 )
 
 type protocolResponseMode int
@@ -27,52 +31,88 @@ type configRequest struct {
 	DeviceID     string
 	Password     string
 	DNS          string
+	MTU          int
 	Protocol     int
 	ResponseMode protocolResponseMode
 	Capabilities map[string]bool
 }
 
 type protocolHello struct {
-	Type         string   `json:"type"`
-	ProtocolMin  int      `json:"protocol_min,omitempty"`
-	ProtocolMax  int      `json:"protocol_max,omitempty"`
-	AppVersion   string   `json:"app_version,omitempty"`
-	Capabilities []string `json:"capabilities,omitempty"`
+	Type         string         `json:"type"`
+	Proto        []int          `json:"proto,omitempty"`
+	ProtocolMin  int            `json:"protocol_min,omitempty"`
+	ProtocolMax  int            `json:"protocol_max,omitempty"`
+	AppVersion   string         `json:"app_version,omitempty"`
+	Features     map[string]int `json:"features,omitempty"`
+	Capabilities []string       `json:"capabilities,omitempty"`
 }
 
 type protocolHelloOK struct {
-	Type         string         `json:"type"`
-	Protocol     int            `json:"protocol"`
-	Server       string         `json:"server,omitempty"`
-	Capabilities []string       `json:"capabilities"`
-	Policy       protocolPolicy `json:"policy"`
+	Type     string           `json:"type"`
+	Proto    int              `json:"proto"`
+	Features protocolFeatures `json:"features"`
+	Policy   protocolPolicy   `json:"policy"`
 }
 
 type protocolConfigRequest struct {
-	Type         string          `json:"type"`
-	Protocol     int             `json:"protocol,omitempty"`
-	LocalPort    string          `json:"local_port,omitempty"`
-	DeviceID     string          `json:"device_id,omitempty"`
-	Password     string          `json:"password,omitempty"`
-	DNS          json.RawMessage `json:"dns,omitempty"`
-	Capabilities []string        `json:"capabilities,omitempty"`
+	Type         string                `json:"type"`
+	Proto        int                   `json:"proto,omitempty"`
+	Protocol     int                   `json:"protocol,omitempty"`
+	LocalPort    string                `json:"local_port,omitempty"`
+	DeviceID     string                `json:"device_id,omitempty"`
+	Password     string                `json:"password,omitempty"`
+	DNS          json.RawMessage       `json:"dns,omitempty"`
+	MTU          int                   `json:"mtu,omitempty"`
+	CustomDNS    json.RawMessage       `json:"custom_dns,omitempty"`
+	CustomMTU    int                   `json:"custom_mtu,omitempty"`
+	Options      protocolConfigOptions `json:"options,omitempty"`
+	Features     map[string]int        `json:"features,omitempty"`
+	Capabilities []string              `json:"capabilities,omitempty"`
 }
 
 type protocolConfigResponse struct {
-	Type         string         `json:"type"`
-	Protocol     int            `json:"protocol"`
-	Server       string         `json:"server,omitempty"`
-	Config       string         `json:"config,omitempty"`
-	Error        string         `json:"error,omitempty"`
-	Reason       string         `json:"reason,omitempty"`
-	Capabilities []string       `json:"capabilities,omitempty"`
-	Policy       protocolPolicy `json:"policy,omitempty"`
+	Type     string           `json:"type"`
+	Proto    int              `json:"proto"`
+	Config   string           `json:"config,omitempty"`
+	WG       string           `json:"wg,omitempty"`
+	Error    string           `json:"error,omitempty"`
+	Reason   string           `json:"reason,omitempty"`
+	Features protocolFeatures `json:"features,omitempty"`
+	Policy   protocolPolicy   `json:"policy,omitempty"`
+	Applied  *protocolApplied `json:"applied,omitempty"`
+}
+
+type protocolFeatures map[string]int
+
+type protocolConfigOptions struct {
+	DNS json.RawMessage `json:"dns,omitempty"`
+	MTU int             `json:"mtu,omitempty"`
+}
+
+type protocolApplied struct {
+	DNS string `json:"dns,omitempty"`
+	MTU int    `json:"mtu,omitempty"`
 }
 
 type protocolPolicy struct {
-	MaxWorkers       int      `json:"max_workers"`
-	CustomDNSAllowed bool     `json:"custom_dns_allowed"`
-	Transports       []string `json:"transports,omitempty"`
+	Default protocolPolicyDefault `json:"default"`
+	Allow   protocolPolicyAllow   `json:"allow"`
+	Limits  protocolPolicyLimits  `json:"limits"`
+}
+
+type protocolPolicyDefault struct {
+	DNS string `json:"dns"`
+	MTU int    `json:"mtu"`
+}
+
+type protocolPolicyAllow struct {
+	CustomDNS bool `json:"custom_dns"`
+	CustomMTU bool `json:"custom_mtu"`
+}
+
+type protocolPolicyLimits struct {
+	Workers int    `json:"workers"`
+	MTU     [2]int `json:"mtu"`
 }
 
 func parseProtocolHello(packet []byte) (protocolHello, bool) {
@@ -83,24 +123,38 @@ func parseProtocolHello(packet []byte) (protocolHello, bool) {
 	if err := json.Unmarshal(packet, &msg); err != nil {
 		return msg, false
 	}
-	return msg, msg.Type == "hello"
+	return msg, msg.Type == "hello" && helloSupportsProtocol(msg)
 }
 
 func buildProtocolHelloOK() []byte {
 	payload, err := json.Marshal(protocolHelloOK{
 		Type:     "hello_ok",
-		Protocol: nxiwProtocolVersion,
-		Server:   nxiwServerVersion,
-		Capabilities: []string{
-			protocolFeatureCustomDNS,
-			protocolFeatureWireGuardConfig,
-		},
-		Policy: buildProtocolPolicy(),
+		Proto:    nxiwProtocolVersion,
+		Features: buildProtocolFeatures(),
+		Policy:   buildProtocolPolicy(),
 	})
 	if err != nil {
-		return []byte(`{"type":"hello_ok","protocol":2,"server":"2","capabilities":["custom_dns","wireguard_config"],"policy":{"max_workers":72,"custom_dns_allowed":true,"transports":["udp","tcp"]}}`)
+		return []byte(`{"type":"hello_ok","proto":2,"features":{"custom_dns":1,"custom_mtu":1,"node_policy":1},"policy":{"default":{"dns":"1.1.1.1","mtu":1280},"allow":{"custom_dns":true,"custom_mtu":true},"limits":{"workers":72,"mtu":[1280,1500]}}}`)
 	}
 	return payload
+}
+
+func helloSupportsProtocol(msg protocolHello) bool {
+	if len(msg.Proto) >= 2 {
+		return msg.Proto[0] <= nxiwProtocolVersion && msg.Proto[1] >= nxiwProtocolVersion
+	}
+	if msg.ProtocolMin > 0 || msg.ProtocolMax > 0 {
+		maxProtocol := msg.ProtocolMax
+		if maxProtocol <= 0 {
+			maxProtocol = msg.ProtocolMin
+		}
+		minProtocol := msg.ProtocolMin
+		if minProtocol <= 0 {
+			minProtocol = maxProtocol
+		}
+		return minProtocol <= nxiwProtocolVersion && maxProtocol >= nxiwProtocolVersion
+	}
+	return true
 }
 
 func parseConfigRequest(packet []byte) (configRequest, bool) {
@@ -155,6 +209,10 @@ func parseLegacyConfigRequest(packet []byte) (configRequest, bool) {
 				if req.DNS == "" {
 					req.DNS = strings.TrimSpace(value)
 				}
+			case "mtu", "custom_mtu":
+				if parsed, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
+					req.MTU = parsed
+				}
 			}
 		}
 	}
@@ -173,10 +231,26 @@ func parseJSONConfigRequest(packet []byte) (configRequest, bool) {
 		LocalPort:    strings.TrimSpace(msg.LocalPort),
 		DeviceID:     strings.TrimSpace(msg.DeviceID),
 		Password:     strings.TrimSpace(msg.Password),
-		DNS:          decodeProtocolDNS(msg.DNS),
-		Protocol:     msg.Protocol,
+		DNS:          decodeProtocolDNS(msg.Options.DNS),
+		MTU:          msg.Options.MTU,
+		Protocol:     msg.Proto,
 		ResponseMode: protocolResponseJSON,
 		Capabilities: make(map[string]bool),
+	}
+	if req.DNS == "" {
+		req.DNS = decodeProtocolDNS(msg.DNS)
+	}
+	if req.DNS == "" {
+		req.DNS = decodeProtocolDNS(msg.CustomDNS)
+	}
+	if req.MTU == 0 {
+		req.MTU = msg.MTU
+	}
+	if req.MTU == 0 {
+		req.MTU = msg.CustomMTU
+	}
+	if req.Protocol <= 0 {
+		req.Protocol = msg.Protocol
 	}
 	if req.LocalPort == "" {
 		req.LocalPort = defaultClientPort
@@ -195,21 +269,25 @@ func parseJSONConfigRequest(packet []byte) (configRequest, bool) {
 			req.Capabilities[capability] = true
 		}
 	}
+	for feature, version := range msg.Features {
+		feature = strings.TrimSpace(feature)
+		if feature != "" && version > 0 {
+			req.Capabilities[feature] = true
+		}
+	}
 	return req, true
 }
 
-func buildConfigResponse(req configRequest, config string) []byte {
+func buildConfigResponse(req configRequest, config string, applied protocolApplied) []byte {
 	if req.ResponseMode == protocolResponseJSON {
 		return marshalProtocolResponse(protocolConfigResponse{
 			Type:     "config",
-			Protocol: responseProtocol(req),
-			Server:   nxiwServerVersion,
+			Proto:    responseProtocol(req),
 			Config:   config,
-			Capabilities: []string{
-				protocolFeatureCustomDNS,
-				protocolFeatureWireGuardConfig,
-			},
-			Policy: buildProtocolPolicy(),
+			WG:       config,
+			Features: buildProtocolFeatures(),
+			Policy:   buildProtocolPolicy(),
+			Applied:  &applied,
 		}, []byte("NOCONF"))
 	}
 	return []byte(config)
@@ -219,8 +297,8 @@ func buildNoConfigResponse(req configRequest) []byte {
 	if req.ResponseMode == protocolResponseJSON {
 		return marshalProtocolResponse(protocolConfigResponse{
 			Type:     "no_config",
-			Protocol: responseProtocol(req),
-			Server:   nxiwServerVersion,
+			Proto:    responseProtocol(req),
+			Features: buildProtocolFeatures(),
 			Policy:   buildProtocolPolicy(),
 		}, []byte("NOCONF"))
 	}
@@ -231,21 +309,38 @@ func buildDeniedResponse(req configRequest, reason string) []byte {
 	if req.ResponseMode == protocolResponseJSON {
 		return marshalProtocolResponse(protocolConfigResponse{
 			Type:     "error",
-			Protocol: responseProtocol(req),
-			Server:   nxiwServerVersion,
+			Proto:    responseProtocol(req),
 			Error:    "denied",
 			Reason:   reason,
+			Features: buildProtocolFeatures(),
 			Policy:   buildProtocolPolicy(),
 		}, []byte("DENIED:"+reason))
 	}
 	return []byte("DENIED:" + reason)
 }
 
+func buildProtocolFeatures() protocolFeatures {
+	return protocolFeatures{
+		protocolFeatureCustomDNS:  1,
+		protocolFeatureCustomMTU:  1,
+		protocolFeatureNodePolicy: 1,
+	}
+}
+
 func buildProtocolPolicy() protocolPolicy {
 	return protocolPolicy{
-		MaxWorkers:       72,
-		CustomDNSAllowed: true,
-		Transports:       []string{"udp", "tcp"},
+		Default: protocolPolicyDefault{
+			DNS: dns,
+			MTU: wgMTU,
+		},
+		Allow: protocolPolicyAllow{
+			CustomDNS: true,
+			CustomMTU: true,
+		},
+		Limits: protocolPolicyLimits{
+			Workers: protocolMaxWorkers,
+			MTU:     [2]int{protocolMinMTU, protocolMaxMTU},
+		},
 	}
 }
 
@@ -277,6 +372,13 @@ func decodeProtocolDNS(raw json.RawMessage) string {
 		return strings.TrimSpace(single)
 	}
 	return ""
+}
+
+func normalizeClientMTU(raw int) int {
+	if raw >= protocolMinMTU && raw <= protocolMaxMTU {
+		return raw
+	}
+	return wgMTU
 }
 
 func normalizeClientPort(raw string) string {
