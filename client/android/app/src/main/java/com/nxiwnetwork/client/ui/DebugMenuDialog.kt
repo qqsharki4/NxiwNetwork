@@ -370,6 +370,7 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                         scope.launch { settingsStore.saveSuppressBatteryOptimizationPrompt(enabled) }
                     }
+                    DebugNodePolicyPreview()
                     DebugWavyProgressPreview()
                     DebugMaterial3ExpressivePreview()
                     DebugToolButton(Icons.Default.ContentCopy, "Копировать debug snapshot", "Копирует состояние приложения без хешей и паролей.") {
@@ -455,6 +456,56 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun DebugNodePolicyPreview() {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.30f), RoundedCornerShape(16.dp))
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.ReportProblem, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(
+                "Node policy preview",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        DebugPolicyPreviewRow("Клиент", "MTU 1500 / DNS 8.8.8.8")
+        DebugPolicyPreviewRow("Лимит ноды", "MTU 1280-1420 / custom DNS on")
+        DebugPolicyPreviewRow("Применено", "MTU 1420 / DNS 8.8.8.8")
+        Surface(
+            color = MaterialTheme.colorScheme.error.copy(alpha = 0.10f),
+            contentColor = MaterialTheme.colorScheme.error,
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                "MTU зажат сервером до верхней границы policy.",
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.Medium
+            )
+        }
+    }
+}
+
+@Composable
+private fun DebugPolicyPreviewRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(value, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Medium)
     }
 }
 
