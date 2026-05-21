@@ -5,21 +5,100 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
 type configResponse struct {
-	Type         string   `json:"type"`
-	Protocol     int      `json:"protocol"`
-	Config       string   `json:"config"`
-	Error        string   `json:"error"`
-	Reason       string   `json:"reason"`
-	Capabilities []string `json:"capabilities"`
+	Type         string         `json:"type"`
+	Protocol     int            `json:"protocol"`
+	Config       string         `json:"config"`
+	Error        string         `json:"error"`
+	Reason       string         `json:"reason"`
+	Capabilities []string       `json:"capabilities"`
+	Policy       protocolPolicy `json:"policy"`
 }
+
+type protocolHelloOK struct {
+	Type         string         `json:"type"`
+	Protocol     int            `json:"protocol"`
+	Server       string         `json:"server"`
+	Capabilities []string       `json:"capabilities"`
+	Policy       protocolPolicy `json:"policy"`
+}
+
+type protocolPolicy struct {
+	MaxWorkers       int      `json:"max_workers"`
+	CustomDNSAllowed bool     `json:"custom_dns_allowed"`
+	Transports       []string `json:"transports"`
+}
+
+var protocolV2Disabled atomic.Bool
 
 // RequestConfig запрашивает WireGuard конфиг через DTLS-соединение.
 func RequestConfig(conn net.Conn, localPort, deviceID, password, dnsOverride string) (string, error) {
-	payload, requestMode := buildConfigRequestPayload(localPort, deviceID, password, dnsOverride)
+	if !protocolV2Disabled.Load() {
+		config, err := requestConfigV2(conn, localPort, deviceID, password, dnsOverride)
+		if err == nil {
+			return config, nil
+		}
+		if strings.Contains(err.Error(), "RETRY_LEGACY") {
+			return "", err
+		}
+		return "", err
+	}
+	return requestConfigLegacy(conn, localPort, deviceID, password, dnsOverride)
+}
+
+func requestConfigV2(conn net.Conn, localPort, deviceID, password, dnsOverride string) (string, error) {
+	hello := `{"type":"hello","protocol_min":1,"protocol_max":2,"capabilities":["custom_dns","wireguard_config"]}`
+	if _, err := conn.Write([]byte(hello)); err != nil {
+		protocolV2Disabled.Store(true)
+		return "", fmt.Errorf("RETRY_LEGACY: отправка hello: %w", err)
+	}
+
+	b := make([]byte, 4096)
+	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		protocolV2Disabled.Store(true)
+		return "", fmt.Errorf("RETRY_LEGACY: установка hello дедлайна: %w", err)
+	}
+	n, err := conn.Read(b)
+	_ = conn.SetReadDeadline(time.Time{})
+	if err != nil {
+		protocolV2Disabled.Store(true)
+		return "", fmt.Errorf("RETRY_LEGACY: hello timeout: %w", err)
+	}
+
+	var helloOK protocolHelloOK
+	if err := json.Unmarshal(b[:n], &helloOK); err != nil || helloOK.Type != "hello_ok" || helloOK.Protocol < 2 {
+		protocolV2Disabled.Store(true)
+		return "", fmt.Errorf("RETRY_LEGACY: hello unsupported")
+	}
+
+	payload := buildJSONConfigRequestPayload(localPort, deviceID, password, dnsOverride)
+	if _, err := conn.Write([]byte(payload)); err != nil {
+		return "", fmt.Errorf("отправка JSON get_config: %w", err)
+	}
+
+	if err := conn.SetReadDeadline(time.Now().Add(15 * time.Second)); err != nil {
+		return "", fmt.Errorf("установка дедлайна: %w", err)
+	}
+	n, err = conn.Read(b)
+	_ = conn.SetReadDeadline(time.Time{})
+	if err != nil {
+		return "", fmt.Errorf("чтение JSON ответа конфига: %w", err)
+	}
+
+	resp := string(b[:n])
+	config, err := parseConfigResponse(resp)
+	if err == nil {
+		fmt.Printf("[PROTO] %s\n", describeConfigProtocol("json", resp, config, dnsOverride))
+	}
+	return config, err
+}
+
+func requestConfigLegacy(conn net.Conn, localPort, deviceID, password, dnsOverride string) (string, error) {
+	payload, requestMode := buildLegacyConfigRequestPayload(localPort, deviceID, password, dnsOverride)
 	if _, err := conn.Write([]byte(payload)); err != nil {
 		return "", fmt.Errorf("отправка GETCONF: %w", err)
 	}
@@ -42,7 +121,7 @@ func RequestConfig(conn net.Conn, localPort, deviceID, password, dnsOverride str
 	return config, err
 }
 
-func buildConfigRequestPayload(localPort, deviceID, password, dnsOverride string) (string, string) {
+func buildLegacyConfigRequestPayload(localPort, deviceID, password, dnsOverride string) (string, string) {
 	fields := []string{localPort, deviceID, password}
 	dnsOverride = strings.TrimSpace(dnsOverride)
 	if dnsOverride != "" {
@@ -50,6 +129,25 @@ func buildConfigRequestPayload(localPort, deviceID, password, dnsOverride string
 		return "GETCONF:" + strings.Join(fields, "|"), "extended_legacy"
 	}
 	return "GETCONF:" + strings.Join(fields, "|"), "legacy"
+}
+
+func buildJSONConfigRequestPayload(localPort, deviceID, password, dnsOverride string) string {
+	req := map[string]interface{}{
+		"type":         "get_config",
+		"protocol":     2,
+		"local_port":   localPort,
+		"device_id":    deviceID,
+		"password":     password,
+		"capabilities": []string{"custom_dns", "wireguard_config"},
+	}
+	if dns := splitDNSValues(dnsOverride); len(dns) > 0 {
+		req["dns"] = dns
+	}
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return "{}"
+	}
+	return string(payload)
 }
 
 func parseConfigResponse(resp string) (string, error) {
@@ -102,6 +200,9 @@ func describeConfigProtocol(requestMode, resp, config, dnsOverride string) strin
 			}
 			if len(parsed.Capabilities) > 0 {
 				caps = strings.Join(parsed.Capabilities, ",")
+			}
+			if parsed.Policy.MaxWorkers > 0 {
+				caps = fmt.Sprintf("%s policy=max_workers:%d,custom_dns:%t", caps, parsed.Policy.MaxWorkers, parsed.Policy.CustomDNSAllowed)
 			}
 		}
 	}

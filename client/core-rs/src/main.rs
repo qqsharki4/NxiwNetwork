@@ -40,6 +40,7 @@ const READ_BUF_SIZE: usize = 2000;
 const WAKEUP_PACKET: &[u8] = b"WAKEUP";
 const DEFAULT_CYCLE_SECS: u64 = 36_000;
 const GROUP_READY_DELAY: Duration = Duration::from_secs(2);
+static PROTOCOL_V2_DISABLED: AtomicBool = AtomicBool::new(false);
 
 type Packet = Bytes;
 
@@ -1562,7 +1563,8 @@ async fn run_session(
                 );
             }
             Err(err) => {
-                if err.to_string().contains("FATAL_AUTH") {
+                let err_string = err.to_string();
+                if err_string.contains("FATAL_AUTH") || err_string.contains("RETRY_LEGACY") {
                     return Err(err);
                 }
                 println!("[ВОРКЕР #{worker_id}] Ошибка конфига: {err:#}");
@@ -1668,8 +1670,86 @@ async fn request_config(
     password: &str,
     dns_override: &str,
 ) -> Result<Option<String>> {
+    if !PROTOCOL_V2_DISABLED.load(Ordering::Relaxed) {
+        match request_config_v2(dtls.clone(), local_port, device_id, password, dns_override).await {
+            Ok(config) => return Ok(config),
+            Err(err) if err.to_string().contains("RETRY_LEGACY") => return Err(err),
+            Err(err) => return Err(err),
+        }
+    }
+    request_config_legacy(dtls, local_port, device_id, password, dns_override).await
+}
+
+async fn request_config_v2(
+    dtls: Arc<dyn Conn + Send + Sync>,
+    local_port: &str,
+    device_id: &str,
+    password: &str,
+    dns_override: &str,
+) -> Result<Option<String>> {
+    let hello = r#"{"type":"hello","protocol_min":1,"protocol_max":2,"capabilities":["custom_dns","wireguard_config"]}"#;
+    if let Err(err) = dtls.send(hello.as_bytes()).await {
+        PROTOCOL_V2_DISABLED.store(true, Ordering::Relaxed);
+        bail!("RETRY_LEGACY: отправка hello: {err}");
+    }
+
+    let mut buf = vec![0u8; 4096];
+    let n = match time::timeout(Duration::from_secs(3), dtls.recv(&mut buf)).await {
+        Ok(Ok(n)) => n,
+        Ok(Err(err)) => {
+            PROTOCOL_V2_DISABLED.store(true, Ordering::Relaxed);
+            bail!("RETRY_LEGACY: чтение hello: {err}");
+        }
+        Err(err) => {
+            PROTOCOL_V2_DISABLED.store(true, Ordering::Relaxed);
+            bail!("RETRY_LEGACY: hello timeout: {err}");
+        }
+    };
+    let hello_response = String::from_utf8_lossy(&buf[..n]);
+    let hello_ok = serde_json::from_str::<Value>(&hello_response).ok();
+    let supported = hello_ok
+        .as_ref()
+        .and_then(|value| value.get("type").and_then(Value::as_str))
+        == Some("hello_ok")
+        && hello_ok
+            .as_ref()
+            .and_then(|value| value.get("protocol").and_then(Value::as_i64))
+            .unwrap_or(0)
+            >= 2;
+    if !supported {
+        PROTOCOL_V2_DISABLED.store(true, Ordering::Relaxed);
+        bail!("RETRY_LEGACY: hello unsupported");
+    }
+
+    let payload = build_json_config_request_payload(local_port, device_id, password, dns_override);
+    dtls.send(payload.as_bytes())
+        .await
+        .context("отправка JSON get_config")?;
+
+    let n = time::timeout(Duration::from_secs(15), dtls.recv(&mut buf))
+        .await
+        .context("чтение JSON ответа конфига: timeout")?
+        .context("чтение JSON ответа конфига")?;
+    let response = String::from_utf8_lossy(&buf[..n]).to_string();
+    let config = parse_config_response(&response);
+    if let Ok(config) = &config {
+        println!(
+            "[PROTO] {}",
+            describe_config_protocol("json", &response, config.as_deref(), dns_override)
+        );
+    }
+    config
+}
+
+async fn request_config_legacy(
+    dtls: Arc<dyn Conn + Send + Sync>,
+    local_port: &str,
+    device_id: &str,
+    password: &str,
+    dns_override: &str,
+) -> Result<Option<String>> {
     let (payload, request_mode) =
-        build_config_request_payload(local_port, device_id, password, dns_override);
+        build_legacy_config_request_payload(local_port, device_id, password, dns_override);
     dtls.send(payload.as_bytes())
         .await
         .context("отправка GETCONF")?;
@@ -1690,7 +1770,7 @@ async fn request_config(
     config
 }
 
-fn build_config_request_payload(
+fn build_legacy_config_request_payload(
     local_port: &str,
     device_id: &str,
     password: &str,
@@ -1710,6 +1790,27 @@ fn build_config_request_payload(
             "extended_legacy",
         )
     }
+}
+
+fn build_json_config_request_payload(
+    local_port: &str,
+    device_id: &str,
+    password: &str,
+    dns_override: &str,
+) -> String {
+    let mut payload = serde_json::json!({
+        "type": "get_config",
+        "protocol": 2,
+        "local_port": local_port,
+        "device_id": device_id,
+        "password": password,
+        "capabilities": ["custom_dns", "wireguard_config"]
+    });
+    let dns = split_dns_values(dns_override);
+    if !dns.is_empty() {
+        payload["dns"] = serde_json::json!(dns);
+    }
+    payload.to_string()
 }
 
 fn parse_config_response(response: &str) -> Result<Option<String>> {
@@ -1790,6 +1891,16 @@ fn describe_config_protocol(
                     .join(",");
                 if !joined.is_empty() {
                     caps = joined;
+                }
+            }
+            if let Some(policy) = value.get("policy") {
+                if let Some(max_workers) = policy.get("max_workers").and_then(Value::as_i64) {
+                    let custom_dns = policy
+                        .get("custom_dns_allowed")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    caps =
+                        format!("{caps} policy=max_workers:{max_workers},custom_dns:{custom_dns}");
                 }
             }
         }

@@ -8,6 +8,7 @@ import (
 
 const (
 	nxiwProtocolVersion = 2
+	nxiwServerVersion   = "2"
 	defaultClientPort   = "9000"
 
 	protocolFeatureCustomDNS       = "custom_dns"
@@ -40,9 +41,11 @@ type protocolHello struct {
 }
 
 type protocolHelloOK struct {
-	Type         string   `json:"type"`
-	Protocol     int      `json:"protocol"`
-	Capabilities []string `json:"capabilities"`
+	Type         string         `json:"type"`
+	Protocol     int            `json:"protocol"`
+	Server       string         `json:"server,omitempty"`
+	Capabilities []string       `json:"capabilities"`
+	Policy       protocolPolicy `json:"policy"`
 }
 
 type protocolConfigRequest struct {
@@ -56,12 +59,20 @@ type protocolConfigRequest struct {
 }
 
 type protocolConfigResponse struct {
-	Type         string   `json:"type"`
-	Protocol     int      `json:"protocol"`
-	Config       string   `json:"config,omitempty"`
-	Error        string   `json:"error,omitempty"`
-	Reason       string   `json:"reason,omitempty"`
-	Capabilities []string `json:"capabilities,omitempty"`
+	Type         string         `json:"type"`
+	Protocol     int            `json:"protocol"`
+	Server       string         `json:"server,omitempty"`
+	Config       string         `json:"config,omitempty"`
+	Error        string         `json:"error,omitempty"`
+	Reason       string         `json:"reason,omitempty"`
+	Capabilities []string       `json:"capabilities,omitempty"`
+	Policy       protocolPolicy `json:"policy,omitempty"`
+}
+
+type protocolPolicy struct {
+	MaxWorkers       int      `json:"max_workers"`
+	CustomDNSAllowed bool     `json:"custom_dns_allowed"`
+	Transports       []string `json:"transports,omitempty"`
 }
 
 func parseProtocolHello(packet []byte) (protocolHello, bool) {
@@ -79,13 +90,15 @@ func buildProtocolHelloOK() []byte {
 	payload, err := json.Marshal(protocolHelloOK{
 		Type:     "hello_ok",
 		Protocol: nxiwProtocolVersion,
+		Server:   nxiwServerVersion,
 		Capabilities: []string{
 			protocolFeatureCustomDNS,
 			protocolFeatureWireGuardConfig,
 		},
+		Policy: buildProtocolPolicy(),
 	})
 	if err != nil {
-		return []byte(`{"type":"hello_ok","protocol":2,"capabilities":["custom_dns","wireguard_config"]}`)
+		return []byte(`{"type":"hello_ok","protocol":2,"server":"2","capabilities":["custom_dns","wireguard_config"],"policy":{"max_workers":72,"custom_dns_allowed":true,"transports":["udp","tcp"]}}`)
 	}
 	return payload
 }
@@ -190,11 +203,13 @@ func buildConfigResponse(req configRequest, config string) []byte {
 		return marshalProtocolResponse(protocolConfigResponse{
 			Type:     "config",
 			Protocol: responseProtocol(req),
+			Server:   nxiwServerVersion,
 			Config:   config,
 			Capabilities: []string{
 				protocolFeatureCustomDNS,
 				protocolFeatureWireGuardConfig,
 			},
+			Policy: buildProtocolPolicy(),
 		}, []byte("NOCONF"))
 	}
 	return []byte(config)
@@ -205,6 +220,8 @@ func buildNoConfigResponse(req configRequest) []byte {
 		return marshalProtocolResponse(protocolConfigResponse{
 			Type:     "no_config",
 			Protocol: responseProtocol(req),
+			Server:   nxiwServerVersion,
+			Policy:   buildProtocolPolicy(),
 		}, []byte("NOCONF"))
 	}
 	return []byte("NOCONF")
@@ -215,11 +232,21 @@ func buildDeniedResponse(req configRequest, reason string) []byte {
 		return marshalProtocolResponse(protocolConfigResponse{
 			Type:     "error",
 			Protocol: responseProtocol(req),
+			Server:   nxiwServerVersion,
 			Error:    "denied",
 			Reason:   reason,
+			Policy:   buildProtocolPolicy(),
 		}, []byte("DENIED:"+reason))
 	}
 	return []byte("DENIED:" + reason)
+}
+
+func buildProtocolPolicy() protocolPolicy {
+	return protocolPolicy{
+		MaxWorkers:       72,
+		CustomDNSAllowed: true,
+		Transports:       []string{"udp", "tcp"},
+	}
 }
 
 func responseProtocol(req configRequest) int {

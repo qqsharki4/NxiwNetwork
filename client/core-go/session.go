@@ -258,7 +258,7 @@ func RunSession(
 		conf, confErr := RequestConfig(dtlsConn, localPort, deviceID, password, tp.Dns)
 		if confErr != nil {
 			errStr := confErr.Error()
-			if strings.Contains(errStr, "FATAL_AUTH") {
+			if strings.Contains(errStr, "FATAL_AUTH") || strings.Contains(errStr, "RETRY_LEGACY") {
 				return false, confErr
 			}
 			log.Printf("[ВОРКЕР #%d] Ошибка конфига: %v", sessionID, confErr)

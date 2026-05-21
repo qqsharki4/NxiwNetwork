@@ -282,7 +282,8 @@ object TunnelManager {
             else -> values["dns"] ?: "unknown"
         }
         val caps = values["caps"]?.takeIf { it != "none" } ?: "none"
-        return "$request -> $response / $protocol / json=${if (json) "yes" else "no"} / dns=$dns / caps=$caps"
+        val policy = values["policy"]?.let { " / policy=$it" } ?: ""
+        return "$request -> $response / $protocol / json=${if (json) "yes" else "no"} / dns=$dns / caps=$caps$policy"
     }
 
     fun start(context: Context, params: TunnelParams, isSwitching: Boolean = false) {
