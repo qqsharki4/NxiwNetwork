@@ -9,12 +9,14 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/pion/dtls/v3"
 	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
+	"golang.zx2c4.com/wireguard/device"
 )
 
 const (
@@ -36,6 +38,7 @@ func main() {
 	mainPass := flag.String("password", "", "пароль владельца")
 	adminID := flag.String("admin", "", "Telegram Admin ID")
 	botToken := flag.String("bot-token", "", "Telegram Bot Token")
+	wrapListen := flag.String("wrap-listen", "", "опциональный WRAP/OBFS DTLS адрес, например 0.0.0.0:56002")
 	policyDefaultDNS := flag.String("policy-default-dns", defaultPolicyDNS, "DNS по умолчанию для клиентского WireGuard-конфига")
 	policyDefaultMTU := flag.Int("policy-default-mtu", defaultPolicyMTU, "MTU по умолчанию для клиентского WireGuard-конфига")
 	policyAllowCustomDNS := flag.Bool("policy-allow-custom-dns", true, "разрешить клиенту передавать custom DNS")
@@ -84,6 +87,13 @@ func main() {
 
 	initDB(*configDir, *mainPass, *adminID, *botToken)
 	defer closeDB()
+	dbMutex.Lock()
+	if err := refreshWrapKeysFromDBLocked(); err != nil {
+		dbMutex.Unlock()
+		log.Fatalf("[WRAP] Ключи: %v", err)
+	}
+	wrapKeyCount := serverWrapKeys.Count()
+	dbMutex.Unlock()
 
 	keys, err := loadOrGenerateKeys(*configDir)
 	if err != nil {
@@ -113,17 +123,74 @@ func main() {
 		ConnectionIDGenerator: dtls.RandomCIDGenerator(8),
 	}
 
-	listener, err := dtls.Listen("udp", addr, dtlsCfg)
-	if err != nil {
-		log.Fatalf("[DTLS] %v", err)
+	wgEndpoint := fmt.Sprintf("127.0.0.1:%d", internalWGPort)
+
+	var listener dtlsAcceptCloser
+	if wrapKeyCount > 0 {
+		packetListener, err := listenWrapped(addr, serverWrapKeys)
+		if err != nil {
+			log.Fatalf("[DTLS/WRAP] listener: %v", err)
+		}
+		dtlsListener, err := dtls.NewListenerWithOptions(
+			packetListener,
+			dtls.WithCertificates(cert),
+			dtls.WithExtendedMasterSecret(dtls.RequireExtendedMasterSecret),
+			dtls.WithCipherSuites(dtls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256),
+			dtls.WithConnectionIDGenerator(dtls.RandomCIDGenerator(8)),
+		)
+		if err != nil {
+			log.Fatalf("[DTLS/WRAP] DTLS listener: %v", err)
+		}
+		listener = dtlsListener
+		nodePolicy.AllowWrap = true
+		log.Printf("   DTLS/WRAP: %s | keys: %d | WG: %s | NAT: %s", *listen, wrapKeyCount, wgEndpoint, natType)
+	} else {
+		dtlsListener, err := dtls.Listen("udp", addr, dtlsCfg)
+		if err != nil {
+			log.Fatalf("[DTLS] %v", err)
+		}
+		listener = dtlsListener
+		log.Printf("   DTLS: %s | WG: %s | NAT: %s", *listen, wgEndpoint, natType)
 	}
 	context.AfterFunc(ctx, func() { listener.Close() })
 
-	wgEndpoint := fmt.Sprintf("127.0.0.1:%d", internalWGPort)
-
-	log.Printf("   DTLS: %s | WG: %s | NAT: %s", *listen, wgEndpoint, natType)
+	if strings.TrimSpace(*wrapListen) != "" {
+		wrapAddr, err := net.ResolveUDPAddr("udp", *wrapListen)
+		if err != nil {
+			log.Fatalf("[WRAP] адрес %q: %v", *wrapListen, err)
+		}
+		if wrapKeyCount == 0 {
+			log.Fatalf("[WRAP] нет активных ключей для %s", *wrapListen)
+		}
+		wrapPacketListener, err := listenWrapped(wrapAddr, serverWrapKeys)
+		if err != nil {
+			log.Fatalf("[WRAP] listener: %v", err)
+		}
+		wrappedListener, err := dtls.NewListenerWithOptions(
+			wrapPacketListener,
+			dtls.WithCertificates(cert),
+			dtls.WithExtendedMasterSecret(dtls.RequireExtendedMasterSecret),
+			dtls.WithCipherSuites(dtls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256),
+			dtls.WithConnectionIDGenerator(dtls.RandomCIDGenerator(8)),
+		)
+		if err != nil {
+			log.Fatalf("[WRAP] DTLS listener: %v", err)
+		}
+		context.AfterFunc(ctx, func() { wrappedListener.Close() })
+		log.Printf("   WRAP: %s | keys: %d", *wrapListen, wrapKeyCount)
+		go acceptDTLSLoop(ctx, "WRAP", wrappedListener, wgEndpoint, wgDev, keys)
+	}
 	log.Println("[SERVER] Готов")
 
+	acceptDTLSLoop(ctx, "DTLS", listener, wgEndpoint, wgDev, keys)
+}
+
+type dtlsAcceptCloser interface {
+	Accept() (net.Conn, error)
+	Close() error
+}
+
+func acceptDTLSLoop(ctx context.Context, label string, listener dtlsAcceptCloser, wgEndpoint string, wgDev *device.Device, keys *wgKeys) {
 	var wg sync.WaitGroup
 	for {
 		dtlsConn, err := listener.Accept()
@@ -140,6 +207,7 @@ func main() {
 		go func(c net.Conn) {
 			defer wg.Done()
 			defer c.Close()
+			log.Printf("[%s] accepted %s", label, c.RemoteAddr())
 			handleConn(ctx, c, wgEndpoint, wgDev, keys)
 		}(dtlsConn)
 	}

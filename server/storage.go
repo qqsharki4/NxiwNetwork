@@ -106,6 +106,9 @@ func saveDB() {
 	if err := saveDBToSQLite(sqliteDB, db); err != nil {
 		log.Printf("[DB] save failed: %v", err)
 	}
+	if err := refreshWrapKeysFromDBLocked(); err != nil {
+		log.Printf("[WRAP] refresh keys failed: %v", err)
+	}
 }
 
 func closeDB() {

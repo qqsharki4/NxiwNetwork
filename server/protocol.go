@@ -13,6 +13,7 @@ const (
 	protocolFeatureCustomDNS       = "custom_dns"
 	protocolFeatureCustomMTU       = "custom_mtu"
 	protocolFeatureNodePolicy      = "node_policy"
+	protocolFeatureWrapTransport   = "wrap_transport"
 	protocolFeatureWireGuardConfig = "wireguard_config"
 	defaultPolicyDNS               = dns
 	defaultPolicyMTU               = wgMTU
@@ -36,6 +37,7 @@ type protocolPolicyRuntime struct {
 	DefaultMTU     int
 	AllowCustomDNS bool
 	AllowCustomMTU bool
+	AllowWrap      bool
 	MaxWorkers     int
 	MinMTU         int
 	MaxMTU         int
@@ -130,6 +132,7 @@ type protocolPolicyDefault struct {
 type protocolPolicyAllow struct {
 	CustomDNS bool `json:"custom_dns"`
 	CustomMTU bool `json:"custom_mtu"`
+	Wrap      bool `json:"wrap_transport"`
 }
 
 type protocolPolicyLimits struct {
@@ -348,11 +351,15 @@ func buildDeniedResponse(req configRequest, reason string) []byte {
 }
 
 func buildProtocolFeatures() protocolFeatures {
-	return protocolFeatures{
+	features := protocolFeatures{
 		protocolFeatureCustomDNS:  1,
 		protocolFeatureCustomMTU:  1,
 		protocolFeatureNodePolicy: 1,
 	}
+	if nodePolicy.AllowWrap {
+		features[protocolFeatureWrapTransport] = 1
+	}
+	return features
 }
 
 func buildProtocolPolicy() protocolPolicy {
@@ -364,6 +371,7 @@ func buildProtocolPolicy() protocolPolicy {
 		Allow: protocolPolicyAllow{
 			CustomDNS: nodePolicy.AllowCustomDNS,
 			CustomMTU: nodePolicy.AllowCustomMTU,
+			Wrap:      nodePolicy.AllowWrap,
 		},
 		Limits: protocolPolicyLimits{
 			Workers: nodePolicy.MaxWorkers,

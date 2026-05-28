@@ -16,7 +16,6 @@ import (
 
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
-	"golang.zx2c4.com/wireguard/ipc"
 	"golang.zx2c4.com/wireguard/tun"
 )
 
@@ -141,11 +140,7 @@ func startUserspaceWG(keys *wgKeys) (*device.Device, error) {
 	}
 
 	go func() {
-		uapiFile, err := ipc.UAPIOpen(ifaceName)
-		if err != nil {
-			return
-		}
-		uapi, err := ipc.UAPIListen(ifaceName, uapiFile)
+		uapi, err := listenUAPI(ifaceName)
 		if err != nil {
 			return
 		}
