@@ -658,12 +658,17 @@ private fun DashboardWidgetsSection(
             if (draggedWidgetSize != IntSize.Zero) {
                 val overlayWidth = with(density) { draggedWidgetSize.width.toDp() }
                 val overlayHeight = with(density) { draggedWidgetSize.height.toDp() }
+                val overlayPosition = if (isDropAnimating) {
+                    Offset(animatedDragX, animatedDragY)
+                } else {
+                    dragVisualPosition
+                }
                 Box(
                     modifier = Modifier
                         .offset {
                             IntOffset(
-                                animatedDragX.roundToInt(),
-                                animatedDragY.roundToInt()
+                                overlayPosition.x.roundToInt(),
+                                overlayPosition.y.roundToInt()
                             )
                         }
                         .width(overlayWidth)
