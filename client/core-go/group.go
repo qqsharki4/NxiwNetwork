@@ -467,6 +467,7 @@ type TurnParams struct {
 	Sni           string
 	Dns           string
 	Mtu           int
+	WrapKey       []byte
 }
 
 // Unused import suppressor

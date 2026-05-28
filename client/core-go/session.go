@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/cipher"
 	"crypto/tls"
 	"fmt"
 	"log"
@@ -27,6 +28,20 @@ const (
 )
 
 var wakeupPacket = []byte("WAKEUP")
+
+var (
+	handshakeSem    = make(chan struct{}, 3)
+	sessionCertOnce sync.Once
+	sessionCert     tls.Certificate
+	sessionCertErr  error
+)
+
+func getSessionCertificate() (tls.Certificate, error) {
+	sessionCertOnce.Do(func() {
+		sessionCert, sessionCertErr = selfsign.GenerateSelfSigned()
+	})
+	return sessionCert, sessionCertErr
+}
 
 // NullLoggerFactory подавляет логи pion
 type NullLoggerFactory struct{}
@@ -121,14 +136,23 @@ func RunSession(
 	}
 	log.Printf("[СЕССИЯ #%d] TURN %s (%s)", sessionID, turnAddr, proto)
 
+	var addrFamily turn.RequestedAddressFamily
+	if peer.IP.To4() != nil {
+		addrFamily = turn.RequestedAddressFamilyIPv4
+	} else {
+		addrFamily = turn.RequestedAddressFamilyIPv6
+	}
+
 	// TURN Client (pion/turn/v5)
 	tc, err := turn.NewClient(&turn.ClientConfig{
-		STUNServerAddr: turnAddr,
-		TURNServerAddr: turnAddr,
-		Conn:           turnConn,
-		Username:       creds.User,
-		Password:       creds.Pass,
-		LoggerFactory:  &NullLoggerFactory{},
+		STUNServerAddr:         turnAddr,
+		TURNServerAddr:         turnAddr,
+		Conn:                   turnConn,
+		Net:                    noInterfaceNet{},
+		Username:               creds.User,
+		Password:               creds.Pass,
+		RequestedAddressFamily: addrFamily,
+		LoggerFactory:          &NullLoggerFactory{},
 	})
 	if err != nil {
 		return false, fmt.Errorf("TURN клиент: %w", err)
@@ -176,6 +200,20 @@ func RunSession(
 	// Relay ↔ Pipe proxy
 	var relayWg sync.WaitGroup
 	relayWg.Add(2)
+	useWrap := len(tp.WrapKey) == wrapKeyLen
+
+	var obfsCfg *ObfsConfig
+	var obfsWriteState *ObfsState
+	var obfsAEAD cipher.AEAD
+	if useWrap {
+		var cipherErr error
+		obfsAEAD, cipherErr = newObfsAEAD(tp.WrapKey)
+		if cipherErr != nil {
+			return false, cipherErr
+		}
+		obfsCfg = NewObfsConfig()
+		obfsWriteState = NewObfsState()
+	}
 
 	stopRelay := context.AfterFunc(sessCtx, func() {
 		_ = relay.SetDeadline(time.Now())
@@ -187,13 +225,27 @@ func RunSession(
 	go func() {
 		defer relayWg.Done()
 		defer sessCancel()
-		b := make([]byte, readBufSize)
+		b := make([]byte, readBufSize+80)
+		plain := make([]byte, readBufSize)
 		for {
 			n, _, readErr := relay.ReadFrom(b)
 			if readErr != nil {
 				return
 			}
-			if _, writeErr := pipeA.WriteTo(b[:n], peer); writeErr != nil {
+			payload := b[:n]
+			if useWrap {
+				if !obfsIsRTPPacket(payload) {
+					log.Printf("[СЕССИЯ #%d] OBFS unwrap: unexpected packet (n=%d)", sessionID, n)
+					continue
+				}
+				m, wrapErr := obfsUnwrapPacket(obfsAEAD, payload, plain)
+				if wrapErr != nil {
+					log.Printf("[СЕССИЯ #%d] OBFS unwrap: %v (n=%d)", sessionID, wrapErr, n)
+					continue
+				}
+				payload = plain[:m]
+			}
+			if _, writeErr := pipeA.WriteTo(payload, peer); writeErr != nil {
 				return
 			}
 		}
@@ -204,19 +256,34 @@ func RunSession(
 		defer relayWg.Done()
 		defer sessCancel()
 		b := make([]byte, readBufSize)
+		var wrapBuf []byte
+		if useWrap {
+			wrapBuf = make([]byte, obfsMaxWireLen(readBufSize, obfsCfg))
+		}
 		for {
 			n, _, readErr := pipeA.ReadFrom(b)
 			if readErr != nil {
 				return
 			}
-			if _, writeErr := relay.WriteTo(b[:n], peer); writeErr != nil {
+			out := b[:n]
+			if useWrap {
+				if obfsCfg != nil && obfsWriteState != nil {
+					wrapped, wrapErr := obfsWrapPacketTo(obfsAEAD, out, obfsCfg, obfsWriteState, wrapBuf)
+					if wrapErr != nil {
+						log.Printf("[СЕССИЯ #%d] OBFS wrap: %v", sessionID, wrapErr)
+						return
+					}
+					out = wrapped
+				}
+			}
+			if _, writeErr := relay.WriteTo(out, peer); writeErr != nil {
 				return
 			}
 		}
 	}()
 
 	// DTLS с поддержкой Connection ID
-	cert, err := selfsign.GenerateSelfSigned()
+	cert, err := getSessionCertificate()
 	if err != nil {
 		return false, fmt.Errorf("генерация сертификата: %w", err)
 	}
@@ -243,7 +310,13 @@ func RunSession(
 
 	hctx, hcancel := context.WithTimeout(sessCtx, 45*time.Second)
 	log.Printf("[ВОРКЕР #%d] [DTLS] Рукопожатие (Handshake)...", sessionID)
-	err = dtlsConn.HandshakeContext(hctx)
+	select {
+	case handshakeSem <- struct{}{}:
+		err = dtlsConn.HandshakeContext(hctx)
+		<-handshakeSem
+	case <-hctx.Done():
+		err = hctx.Err()
+	}
 	hcancel()
 	if err != nil {
 		return false, fmt.Errorf("DTLS хендшейк: %w", err)

@@ -11,6 +11,7 @@ import (
 
 const (
 	returnChBuf            = 384
+	dispatchChunkSize      = 8
 	schedulerProbeWindow   = 8
 	schedulerMaxScanWindow = 256
 )
@@ -33,6 +34,7 @@ type Dispatcher struct {
 	mu         sync.Mutex
 	workers    []*WorkerSlot
 	rrIndex    int
+	rrCount    int
 	ReturnCh   chan []byte
 	ctx        context.Context
 	cancel     context.CancelFunc
@@ -59,6 +61,7 @@ func NewDispatcher(ctx context.Context, localConn net.PacketConn, stats *Stats) 
 func (d *Dispatcher) Shutdown() {
 	d.cancel()
 	d.wg.Wait()
+	drainPacketChannel(d.ReturnCh)
 }
 
 func (d *Dispatcher) Register(w *WorkerSlot) {
@@ -78,7 +81,12 @@ func (d *Dispatcher) Unregister(slot *WorkerSlot) {
 		}
 	}
 	remaining := len(d.workers)
+	if d.rrIndex >= remaining && remaining > 0 {
+		d.rrIndex %= remaining
+	}
+	d.rrCount = 0
 	d.mu.Unlock()
+	drainPacketChannel(slot.SendCh)
 	log.Printf("[ДИСП] Воркер #%d отключён (осталось: %d)", slot.ID, remaining)
 }
 
@@ -112,22 +120,34 @@ func (d *Dispatcher) readLoop() {
 		}
 
 		startIdx := d.rrIndex % nw
-		bestIdx, bestQueued := d.pickLeastQueuedWorker(
-			startIdx,
-			minInt(nw, schedulerProbeWindow),
-			workerSendBuf+1,
-			schedulerScratch[:],
-		)
-		if bestIdx == -1 && nw > schedulerProbeWindow {
+		bestIdx := -1
+		bestQueued := workerSendBuf + 1
+		if d.rrCount > 0 && d.rrCount < dispatchChunkSize {
+			current := d.workers[startIdx]
+			if len(current.SendCh) < cap(current.SendCh) {
+				bestIdx = startIdx
+				bestQueued = len(current.SendCh)
+			}
+		}
+		if bestIdx == -1 {
 			bestIdx, bestQueued = d.pickLeastQueuedWorker(
-				(startIdx+schedulerProbeWindow)%nw,
-				nw-schedulerProbeWindow,
+				startIdx,
+				minInt(nw, schedulerProbeWindow),
 				bestQueued,
 				schedulerScratch[:],
 			)
+			if bestIdx == -1 && nw > schedulerProbeWindow {
+				bestIdx, bestQueued = d.pickLeastQueuedWorker(
+					(startIdx+schedulerProbeWindow)%nw,
+					nw-schedulerProbeWindow,
+					bestQueued,
+					schedulerScratch[:],
+				)
+			}
 		}
 		if bestIdx == -1 {
 			d.rrIndex = (startIdx + 1) % nw
+			d.rrCount = 0
 			atomic.AddInt64(&d.stats.DroppedPackets, 1)
 			d.mu.Unlock()
 			continue
@@ -137,12 +157,18 @@ func (d *Dispatcher) readLoop() {
 		w := d.workers[bestIdx]
 		select {
 		case w.SendCh <- pkt:
-			d.rrIndex = (bestIdx + 1) % nw
+			d.rrIndex = bestIdx
+			d.rrCount++
+			if d.rrCount >= dispatchChunkSize {
+				d.rrIndex = (bestIdx + 1) % nw
+				d.rrCount = 0
+			}
 			atomic.AddInt64(&d.stats.PacketsUp, 1)
 			atomic.AddInt64(&w.QueuedPackets, 1)
 			atomic.AddInt64(&w.QueuedBytes, int64(n))
 		default:
 			d.rrIndex = (bestIdx + 1) % nw
+			d.rrCount = 0
 			atomic.AddInt64(&d.stats.DroppedPackets, 1)
 			releasePacket(pkt)
 		}

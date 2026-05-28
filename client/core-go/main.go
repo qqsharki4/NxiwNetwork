@@ -145,6 +145,7 @@ func main() {
 	dnsOverride := flag.String("dns", "", "DNS для WireGuard-конфига")
 	mtuOverride := flag.Int("mtu", 0, "MTU для WireGuard-конфига")
 	noDns := flag.Bool("nodns", false, "отключить DNS Яндекса")
+	wrapMode := flag.Bool("wrap", false, "включить WRAP/OBFS поверх DTLS (требует серверный wrap-listen)")
 
 	appID := flag.String("vk-app-id", "6287487", "VK App ID")
 	appSecret := flag.String("vk-app-secret", "QbYic1K3lEV5kTGiqlq2", "VK App Secret")
@@ -197,6 +198,13 @@ func main() {
 		*keepaliveSeconds = 60
 	}
 	keepaliveInterval := time.Duration(*keepaliveSeconds) * time.Second
+	var wrapKey []byte
+	if *wrapMode {
+		wrapKey, err = deriveWrapKey(*connPassword)
+		if err != nil {
+			log.Fatalf("[КЛИЕНТ] WRAP: %v", err)
+		}
+	}
 
 	tp := &TurnParams{
 		Host:          *host,
@@ -206,6 +214,7 @@ func main() {
 		Sni:           *sni,
 		Dns:           strings.TrimSpace(*dnsOverride),
 		Mtu:           *mtuOverride,
+		WrapKey:       wrapKey,
 	}
 
 	// Слушаем локально
@@ -240,6 +249,11 @@ func main() {
 	log.Printf("[КЛИЕНТ] Device ID: %s", *deviceID)
 	log.Printf("[КЛИЕНТ] Обход капчи: %s", captchaMode.Load().(string))
 	log.Printf("[КЛИЕНТ] Keepalive: %d сек", *keepaliveSeconds)
+	if *wrapMode {
+		log.Printf("[КЛИЕНТ] WRAP/OBFS: ON")
+	} else {
+		log.Printf("[КЛИЕНТ] WRAP/OBFS: OFF")
+	}
 	log.Println("[КЛИЕНТ] ═══════════════════════════════════════")
 
 	stats := NewStats()
