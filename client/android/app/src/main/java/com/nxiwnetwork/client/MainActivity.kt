@@ -1037,15 +1037,16 @@ fun StretchyNavigationBar(
     tunnelRunning: Boolean
 ) {
     Surface(
-        color = MaterialTheme.colorScheme.surfaceContainer,
-        tonalElevation = 0.dp,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.96f),
+        tonalElevation = 6.dp,
+        shadowElevation = 8.dp,
         modifier = Modifier.fillMaxWidth()
     ) {
         BoxWithConstraints(
             modifier = Modifier
                 .windowInsetsPadding(NavigationBarDefaults.windowInsets)
                 .fillMaxWidth()
-                .height(80.dp)
+                .height(84.dp)
         ) {
             val tabWidth = maxWidth / items.size
             val indicatorHalfWidth = if (tabWidth < 68.dp) {
@@ -1071,25 +1072,35 @@ fun StretchyNavigationBar(
 
             Box(
                 modifier = Modifier
-                    .offset(x = leftEdge, y = 16.dp)
+                    .offset(x = leftEdge, y = 14.dp)
                     .width(rightEdge - leftEdge)
-                    .height(32.dp)
+                    .height(38.dp)
                     .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.secondaryContainer)
+                    .background(MaterialTheme.colorScheme.primaryContainer)
             )
 
             Row(modifier = Modifier.fillMaxSize()) {
                 items.forEachIndexed { index, item ->
                     val selected = selectedIndex == index
-                    val iconColor by animateColorAsState(if (selected) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant, label = "")
-                    val textColor by animateColorAsState(if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant, label = "")
+                    val iconColor by animateColorAsState(
+                        if (selected) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                        label = ""
+                    )
+                    val textColor by animateColorAsState(
+                        if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                        label = ""
+                    )
+                    val iconScale by animateFloatAsState(
+                        if (selected) 1.10f else 0.94f,
+                        animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+                        label = ""
+                    )
                     val textWeight = if (selected) FontWeight.Bold else FontWeight.Medium
 
                     Box(
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxHeight()
-                            .padding(horizontal = 2.dp)
                             .clickable(
                                 interactionSource = remember { MutableInteractionSource() },
                                 indication = null,
@@ -1112,21 +1123,17 @@ fun StretchyNavigationBar(
                                         }
                                     }
                                 ) {
-                                    AnimatedContent(
-                                        targetState = selected,
-                                        transitionSpec = {
-                                            fadeIn(tween(120, delayMillis = 30)) togetherWith
-                                                fadeOut(tween(90))
-                                        },
-                                        label = "nav_icon_${item.label}"
-                                    ) { isSelected ->
-                                        Icon(
-                                            if (isSelected) item.selectedIcon else item.unselectedIcon,
-                                            contentDescription = item.label,
-                                            tint = iconColor,
-                                            modifier = Modifier.size(24.dp)
-                                        )
-                                    }
+                                    Icon(
+                                        if (selected) item.selectedIcon else item.unselectedIcon,
+                                        contentDescription = item.label,
+                                        tint = iconColor,
+                                        modifier = Modifier
+                                            .size(24.dp)
+                                            .graphicsLayer {
+                                                scaleX = iconScale
+                                                scaleY = iconScale
+                                            }
+                                    )
                                 }
                             }
                             Spacer(modifier = Modifier.height(4.dp))
