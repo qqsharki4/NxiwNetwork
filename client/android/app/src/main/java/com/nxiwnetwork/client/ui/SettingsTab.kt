@@ -196,6 +196,7 @@ fun SettingsTab() {
     val sni by settingsStore.sni.collectAsStateWithLifecycle("")
     val connPass by settingsStore.connectionPassword.collectAsStateWithLifecycle("")
     val protocol by settingsStore.protocol.collectAsStateWithLifecycle("udp")
+    val wrapTransport by settingsStore.wrapTransport.collectAsStateWithLifecycle(false)
     val captchaMethod by settingsStore.captchaSolveMethod.collectAsStateWithLifecycle("manual")
     val savedServersJson by settingsStore.savedServersJson.collectAsStateWithLifecycle("[]")
     val dashboardWidgetsRaw by settingsStore.dashboardWidgets.collectAsStateWithLifecycle(SettingsStore.DEFAULT_DASHBOARD_WIDGETS)
@@ -342,6 +343,7 @@ fun SettingsTab() {
                             putExtra("connection_password", connPass.trim())
                             putExtra("protocol", protocol)
                             putExtra("captcha_mode", captchaModeForMethod(captchaMethod))
+                            putExtra("wrap_transport", wrapTransport)
                             putExtra("wifi_high_performance", wifiHighPerformance)
                             putExtra("client_keepalive_seconds", clientKeepaliveSeconds)
                         }
@@ -979,22 +981,6 @@ fun ConnectControlWidget(
         modifier = modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 18.dp), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-            FilterChip(
-                selected = protocol == "udp",
-                onClick = { onProtocolSelected("udp") },
-                label = { Text("UDP", fontWeight = FontWeight.Bold) },
-                enabled = !tunnelRunning
-            )
-            Spacer(modifier = Modifier.width(12.dp))
-            FilterChip(
-                selected = protocol == "tcp",
-                onClick = { onProtocolSelected("tcp") },
-                label = { Text("TCP", fontWeight = FontWeight.Bold) },
-                enabled = !tunnelRunning
-            )
-        }
-
         Box(contentAlignment = Alignment.Center, modifier = Modifier.size(240.dp)) {
             if (tunnelRunning || cooldownSeconds > 0) PremiumRadarWaves(tunnelRunning)
 

@@ -54,6 +54,7 @@ class NxiwWidgetProvider : AppWidgetProvider() {
                         putExtra("protocol", store.protocol.first())
                         putExtra("captcha_mode", store.captchaMode.first())
                         putExtra("connection_password", store.connectionPassword.first())
+                        putExtra("wrap_transport", store.wrapTransport.first())
                         putExtra("wifi_high_performance", store.wifiHighPerformance.first())
                         putExtra("client_keepalive_seconds", store.clientKeepaliveSeconds.first())
                     }

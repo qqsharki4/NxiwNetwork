@@ -397,8 +397,20 @@ object TunnelManager {
                 cmd.add(androidId)
 
                 if (params.connectionPassword.isNotEmpty()) {
-                   cmd.add("-password")
-                   cmd.add(params.connectionPassword)
+                    cmd.add("-password")
+                    cmd.add(params.connectionPassword)
+                }
+
+                val wrapSupported = backendResolution.active == CoreBackend.Go && params.protocol != "tcp"
+                if (params.wrapTransport && wrapSupported) {
+                    if (params.connectionPassword.isBlank()) {
+                        updateLog("wrap_no_password", "[WRAP] Нужен пароль подключения", 20, true)
+                    } else {
+                        cmd.add("-wrap")
+                        updateLog("wrap_transport", "[WRAP] OBFS включен", 20)
+                    }
+                } else if (params.wrapTransport) {
+                    updateLog("wrap_backend", "[WRAP] Доступен только для Go-ядра с UDP", 20, true)
                 }
 
                 cmd.add(if (params.protocol == "tcp") "-tcp" else "-udp")
@@ -1030,6 +1042,7 @@ data class TunnelParams(
     val connectionPassword: String = "",
     val protocol: String = "udp",
     val captchaMode: String = "rjs",
+    val wrapTransport: Boolean = false,
     val wifiHighPerformance: Boolean = true,
     val clientKeepaliveSeconds: Int = 10
 )

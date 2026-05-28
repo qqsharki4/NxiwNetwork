@@ -43,6 +43,7 @@ class SettingsStore(context: Context) {
         private val SAVED_SERVERS = stringPreferencesKey("saved_servers_list")
         private val AUTO_CONNECT_ON_BOOT = booleanPreferencesKey("auto_connect_boot")
         private val CUSTOM_DNS = stringPreferencesKey("custom_dns")
+        private val WRAP_TRANSPORT = booleanPreferencesKey("wrap_transport")
         private val WIFI_HIGH_PERFORMANCE = booleanPreferencesKey("wifi_high_performance")
         private val CLIENT_KEEPALIVE_SECONDS = intPreferencesKey("client_keepalive_seconds")
         private val CORE_BACKEND = stringPreferencesKey("core_backend")
@@ -107,6 +108,7 @@ class SettingsStore(context: Context) {
     val savedServersJson: Flow<String> = dataStore.data.map { it[SAVED_SERVERS] ?: "[]" }
     val autoConnectOnBoot: Flow<Boolean> = dataStore.data.map { it[AUTO_CONNECT_ON_BOOT] ?: false }
     val customDns: Flow<String> = dataStore.data.map { it[CUSTOM_DNS] ?: "default" }
+    val wrapTransport: Flow<Boolean> = dataStore.data.map { it[WRAP_TRANSPORT] ?: false }
     val wifiHighPerformance: Flow<Boolean> = dataStore.data.map { it[WIFI_HIGH_PERFORMANCE] ?: true }
     val clientKeepaliveSeconds: Flow<Int> = dataStore.data.map { it[CLIENT_KEEPALIVE_SECONDS] ?: 10 }
     val coreBackend: Flow<String> = dataStore.data.map { CoreBackend.normalize(it[CORE_BACKEND]) }
@@ -155,6 +157,7 @@ class SettingsStore(context: Context) {
     suspend fun saveExceptionsMode(packages: String, isWhitelist: Boolean) { dataStore.edit { prefs -> prefs[EXCLUDED_APPS] = packages; prefs[IS_WHITELIST] = isWhitelist } }
     suspend fun saveAutoConnect(enabled: Boolean) { dataStore.edit { prefs -> prefs[AUTO_CONNECT_ON_BOOT] = enabled } }
     suspend fun saveCustomDns(dns: String) { dataStore.edit { prefs -> prefs[CUSTOM_DNS] = dns } }
+    suspend fun saveWrapTransport(enabled: Boolean) { dataStore.edit { prefs -> prefs[WRAP_TRANSPORT] = enabled } }
     suspend fun saveWifiHighPerformance(enabled: Boolean) { dataStore.edit { prefs -> prefs[WIFI_HIGH_PERFORMANCE] = enabled } }
     suspend fun saveClientKeepaliveSeconds(seconds: Int) { dataStore.edit { prefs -> prefs[CLIENT_KEEPALIVE_SECONDS] = seconds.coerceIn(5, 60) } }
     suspend fun saveCoreBackend(backend: String) { dataStore.edit { prefs -> prefs[CORE_BACKEND] = CoreBackend.normalize(backend) } }

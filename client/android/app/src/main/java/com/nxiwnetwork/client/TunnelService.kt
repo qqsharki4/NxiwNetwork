@@ -78,6 +78,7 @@ class TunnelService : Service() {
                     connectionPassword = intent.getStringExtra("connection_password") ?: "",
                     protocol = intent.getStringExtra("protocol") ?: "udp",
                     captchaMode = intent.getStringExtra("captcha_mode") ?: "rjs",
+                    wrapTransport = intent.getBooleanExtra("wrap_transport", false),
                     wifiHighPerformance = intent.getBooleanExtra("wifi_high_performance", true),
                     clientKeepaliveSeconds = intent.getIntExtra("client_keepalive_seconds", 10)
                 )
@@ -122,6 +123,7 @@ class TunnelService : Service() {
                     sni = store.sni.first(),
                     connectionPassword = store.connectionPassword.first(),
                     captchaMode = store.captchaMode.first(),
+                    wrapTransport = store.wrapTransport.first(),
                     wifiHighPerformance = store.wifiHighPerformance.first(),
                     clientKeepaliveSeconds = store.clientKeepaliveSeconds.first()
                 )

@@ -509,6 +509,7 @@ class MainActivity : ComponentActivity() {
 	                            putExtra("connection_password", settingsStore.connectionPassword.first())
 	                            putExtra("protocol", settingsStore.protocol.first())
 	                            putExtra("captcha_mode", settingsStore.captchaMode.first())
+	                            putExtra("wrap_transport", settingsStore.wrapTransport.first())
 	                            putExtra("wifi_high_performance", settingsStore.wifiHighPerformance.first())
 	                            putExtra("client_keepalive_seconds", settingsStore.clientKeepaliveSeconds.first())
 	                        }
