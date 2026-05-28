@@ -483,7 +483,7 @@ private fun DashboardWidgetsSection(
                     cooldownSeconds = cooldownSeconds,
                     onProtocolSelected = onProtocolSelected,
                     onPowerClick = onPowerClick,
-                    modifier = modifier.height(334.dp)
+                    modifier = modifier.wrapContentHeight()
                 )
             }
             WidgetType.GRAPH -> {
@@ -827,10 +827,46 @@ fun DiagnosticDialog(context: Context, peer: String, hashes: String, onDismiss: 
                     }
                 }
                 Spacer(Modifier.height(24.dp))
-                Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(20.dp), enabled = step == 4) { Text("Закрыть", fontWeight = FontWeight.Bold) }
+                val closeEnabled = step == 4
+                Button(
+                    onClick = onDismiss,
+                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                    shape = RoundedCornerShape(20.dp),
+                    enabled = closeEnabled,
+                    colors = animatedPrimaryButtonColors(closeEnabled)
+                ) { Text("Закрыть", fontWeight = FontWeight.Bold) }
             }
         }
     }
+}
+
+@Composable
+private fun animatedPrimaryButtonColors(enabled: Boolean): ButtonColors {
+    val containerColor by animateColorAsState(
+        targetValue = if (enabled) {
+            MaterialTheme.colorScheme.primary
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant
+        },
+        animationSpec = tween(durationMillis = 220, easing = LinearOutSlowInEasing),
+        label = "buttonContainerColor"
+    )
+    val contentColor by animateColorAsState(
+        targetValue = if (enabled) {
+            MaterialTheme.colorScheme.onPrimary
+        } else {
+            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+        },
+        animationSpec = tween(durationMillis = 220, easing = LinearOutSlowInEasing),
+        label = "buttonContentColor"
+    )
+
+    return ButtonDefaults.buttonColors(
+        containerColor = containerColor,
+        contentColor = contentColor,
+        disabledContainerColor = containerColor,
+        disabledContentColor = contentColor
+    )
 }
 
 private fun checkInternetAccess(context: Context, preferTunnel: Boolean): Boolean {
@@ -983,10 +1019,12 @@ fun ConnectControlWidget(
     )
 
     Column(
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(top = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Box(contentAlignment = Alignment.Center, modifier = Modifier.size(240.dp)) {
+        Box(contentAlignment = Alignment.Center, modifier = Modifier.size(190.dp)) {
             if (tunnelRunning || cooldownSeconds > 0) PremiumRadarWaves(tunnelRunning)
 
             val circleColor by animateColorAsState(
@@ -1035,7 +1073,7 @@ fun ConnectControlWidget(
                 style = MaterialTheme.typography.titleMedium,
                 color = if (tunnelRunning) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                 fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(top = 12.dp, bottom = 16.dp)
+                modifier = Modifier.padding(top = 6.dp, bottom = 26.dp)
             )
         }
     }
@@ -1130,6 +1168,7 @@ fun AddEditServerDialog(server: NxiwNetworkServer, onDismiss: () -> Unit, onSave
     var passVisible by remember(server.id) { mutableStateOf(false) }
     val isNew = server.name.isBlank()
     val addressValid = ip.isBlank() || isValidNodeAddress(ip)
+    val canSave = name.isNotBlank() && ip.isNotBlank() && addressValid
     Dialog(onDismissRequest = onDismiss) {
         Surface(shape = RoundedCornerShape(28.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh, tonalElevation = 6.dp) {
             Column(modifier = Modifier.padding(24.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -1168,9 +1207,10 @@ fun AddEditServerDialog(server: NxiwNetworkServer, onDismiss: () -> Unit, onSave
                 )
                 Button(
                     onClick = { onSave(server.copy(name = name, ip = normalizeNodeAddressForStorage(ip), password = pass)) },
-                    enabled = name.isNotBlank() && ip.isNotBlank() && addressValid,
+                    enabled = canSave,
                     modifier = Modifier.fillMaxWidth().height(56.dp),
-                    shape = RoundedCornerShape(20.dp)
+                    shape = RoundedCornerShape(20.dp),
+                    colors = animatedPrimaryButtonColors(canSave)
                 ) { Text("Сохранить", fontWeight = FontWeight.Bold, fontSize = 16.sp) }
             }
         }
