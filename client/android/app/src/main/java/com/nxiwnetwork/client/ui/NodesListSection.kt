@@ -30,6 +30,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.FloatingActionButtonMenu
@@ -135,6 +136,12 @@ fun NodesListSection(modifier: Modifier = Modifier) {
             if (existingIndex == -1) "Нода добавлена из буфера" else "Нода обновлена из буфера",
             Toast.LENGTH_SHORT
         ).show()
+    }
+
+    fun openDeployNodePreview() {
+        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+        nodeFabExpanded = false
+        Toast.makeText(context, "Soon...", Toast.LENGTH_SHORT).show()
     }
 
     LaunchedEffect(savedServersJson) {
@@ -246,6 +253,11 @@ fun NodesListSection(modifier: Modifier = Modifier) {
                     onClick = { openNewNodeDialog() },
                     icon = { Icon(Icons.Default.Add, null) },
                     text = { Text("Добавить ноду") }
+                )
+                FloatingActionButtonMenuItem(
+                    onClick = { openDeployNodePreview() },
+                    icon = { Icon(Icons.Default.CloudUpload, null) },
+                    text = { Text("Развернуть ноду") }
                 )
                 FloatingActionButtonMenuItem(
                     onClick = { importNodeFromClipboard() },

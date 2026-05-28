@@ -1015,6 +1015,7 @@ fun NetworkSettings(onBack: () -> Unit) {
         settingsStore.customDns.map { dns -> normalizeDnsType(dns) }
     }.collectAsStateWithLifecycle(initial.dnsType)
     val customDnsIp by settingsStore.customDnsIp.collectAsStateWithLifecycle(initial.customDnsIp)
+    val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
     val coreBackend = CoreBackend.fromId(coreBackendId)
     val showWrapTransport = protocol == "udp" && coreBackend == CoreBackend.Go
 
@@ -1022,6 +1023,14 @@ fun NetworkSettings(onBack: () -> Unit) {
     var animateProtocolSelection by remember { mutableStateOf(false) }
     var animateMtuValue by remember { mutableStateOf(false) }
     var animateDnsSelection by remember { mutableStateOf(false) }
+
+    fun showTunnelRestartToast() {
+        Toast.makeText(
+            context,
+            "Изменения применятся после перезапуска туннеля",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         SettingsHeader("Сеть", onBack)
@@ -1038,7 +1047,10 @@ fun NetworkSettings(onBack: () -> Unit) {
                         shape = SegmentedButtonDefaults.itemShape(index = i, count = 2),
                         icon = { SegmentedSelectionIcon(selected, animateProtocolSelection) },
                         onClick = {
-                            if (protocol != v) animateProtocolSelection = true
+                            if (protocol != v) {
+                                animateProtocolSelection = true
+                                if (tunnelRunning) showTunnelRestartToast()
+                            }
                             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                             scope.launch { settingsStore.saveProtocol(v) }
                         }
@@ -1080,6 +1092,7 @@ fun NetworkSettings(onBack: () -> Unit) {
                         Switch(
                             checked = wrapTransport,
                             onCheckedChange = {
+                                if (wrapTransport != it && tunnelRunning) showTunnelRestartToast()
                                 haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                 scope.launch { settingsStore.saveWrapTransport(it) }
                             }
