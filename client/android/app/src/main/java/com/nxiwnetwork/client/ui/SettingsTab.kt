@@ -468,6 +468,7 @@ private fun DashboardWidgetsSection(
     var pendingDropWidgetList by remember { mutableStateOf<List<WidgetType>?>(null) }
     var placementAnimationsEnabled by remember { mutableStateOf(false) }
     var dragOverlayReady by remember { mutableStateOf(false) }
+    var dragOverlayControlsVisible by remember { mutableStateOf(false) }
     val isDropAnimating = dropAnimationTarget != null
     val dragAnimationSpec = if (isDropAnimating) {
         tween<Float>(durationMillis = 190, easing = FastOutSlowInEasing)
@@ -499,8 +500,11 @@ private fun DashboardWidgetsSection(
         if (draggingWidget != null && draggedWidgetSize != IntSize.Zero) {
             withFrameNanos { }
             dragOverlayReady = true
+            withFrameNanos { }
+            dragOverlayControlsVisible = false
         } else {
             dragOverlayReady = false
+            dragOverlayControlsVisible = false
         }
     }
 
@@ -527,6 +531,7 @@ private fun DashboardWidgetsSection(
             draggingWidget = null
             draggingWidgetIndex = null
             dragOverlayReady = false
+            dragOverlayControlsVisible = false
             dragVisualPosition = Offset.Zero
             draggedWidgetSize = IntSize.Zero
             awaitingDropTarget = false
@@ -542,6 +547,7 @@ private fun DashboardWidgetsSection(
             draggingWidget = null
             draggingWidgetIndex = null
             dragOverlayReady = false
+            dragOverlayControlsVisible = false
             dragVisualPosition = Offset.Zero
             draggedWidgetSize = IntSize.Zero
             awaitingDropTarget = false
@@ -632,6 +638,7 @@ private fun DashboardWidgetsSection(
                         draggingWidget = draggableIndex?.let { previewWidgetList[it] }
                         draggingWidgetIndex = draggableIndex
                         dragOverlayReady = false
+                        dragOverlayControlsVisible = draggableIndex != null
                         dragVisualPosition = item?.offset?.let { Offset(it.x.toFloat(), it.y.toFloat()) } ?: Offset.Zero
                         draggedWidgetSize = item?.size ?: IntSize.Zero
                         awaitingDropTarget = false
@@ -682,6 +689,7 @@ private fun DashboardWidgetsSection(
                             draggingWidget = null
                             draggingWidgetIndex = null
                             dragOverlayReady = false
+                            dragOverlayControlsVisible = false
                             dragVisualPosition = Offset.Zero
                             draggedWidgetSize = IntSize.Zero
                             awaitingDropTarget = false
@@ -691,6 +699,7 @@ private fun DashboardWidgetsSection(
                         draggingWidget = null
                         draggingWidgetIndex = null
                         dragOverlayReady = false
+                        dragOverlayControlsVisible = false
                         dragVisualPosition = Offset.Zero
                         draggedWidgetSize = IntSize.Zero
                         awaitingDropTarget = false
@@ -796,6 +805,27 @@ private fun DashboardWidgetsSection(
                             modifier = Modifier.fillMaxSize(),
                             fillBounds = true
                         )
+                        androidx.compose.animation.AnimatedVisibility(
+                            visible = dragOverlayControlsVisible,
+                            enter = scaleIn(spring(stiffness = Spring.StiffnessMediumLow)) + fadeIn(),
+                            exit = scaleOut(spring(stiffness = Spring.StiffnessMediumLow)) + fadeOut(),
+                            modifier = Modifier.align(Alignment.TopEnd).padding(12.dp)
+                        ) {
+                            Surface(
+                                shape = CircleShape,
+                                color = MaterialTheme.colorScheme.errorContainer,
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        Icons.Default.Remove,
+                                        null,
+                                        tint = MaterialTheme.colorScheme.onErrorContainer,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
