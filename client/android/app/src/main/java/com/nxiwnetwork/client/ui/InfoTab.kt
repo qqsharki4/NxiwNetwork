@@ -1632,14 +1632,11 @@ suspend fun addServerToStoreDirect(context: Context, settingsStore: SettingsStor
     if (ip.isBlank()) return
 
     val currentArray = try { JSONArray(settingsStore.savedServersJson.first()) } catch (e: Exception) { JSONArray() }
-    var existsIdx = -1
-    for (i in 0 until currentArray.length()) { if (currentArray.getJSONObject(i).optString("ip").trim() == ip) { existsIdx = i; break } }
-
-    val newObj = JSONObject().apply { put("id", if (existsIdx != -1) currentArray.getJSONObject(existsIdx).getString("id") else UUID.randomUUID().toString()); put("name", name); put("ip", ip); put("password", pass) }
-    if (existsIdx != -1) currentArray.put(existsIdx, newObj) else currentArray.put(newObj)
+    val newObj = JSONObject().apply { put("id", UUID.randomUUID().toString()); put("name", name); put("ip", ip); put("password", pass) }
+    currentArray.put(newObj)
     settingsStore.saveServersList(currentArray.toString())
 
-    withContext(Dispatchers.Main) { Toast.makeText(context, "Сервер '$name' ${if (existsIdx != -1) "обновлен" else "добавлен"}", Toast.LENGTH_SHORT).show() }
+    withContext(Dispatchers.Main) { Toast.makeText(context, "Сервер '$name' добавлен", Toast.LENGTH_SHORT).show() }
 }
 
 @Composable

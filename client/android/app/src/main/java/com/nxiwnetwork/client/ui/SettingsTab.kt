@@ -30,6 +30,7 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
@@ -57,6 +58,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
@@ -65,7 +68,8 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.zIndex
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nxiwnetwork.client.DEFAULT_NODE_PORT
 import com.nxiwnetwork.client.CoreBackend
@@ -96,6 +100,68 @@ data class NxiwNetworkServer(
     val ip: String,
     val password: String
 )
+
+data class SavedServersDecodeResult(
+    val servers: List<NxiwNetworkServer>,
+    val normalized: Boolean
+)
+
+fun encodeSavedServers(servers: List<NxiwNetworkServer>): String {
+    val array = JSONArray()
+    servers.forEach { server ->
+        array.put(
+            JSONObject().apply {
+                put("id", server.id)
+                put("name", server.name)
+                put("ip", server.ip.trim())
+                put("password", server.password.trim())
+            }
+        )
+    }
+    return array.toString()
+}
+
+fun decodeSavedServersJson(rawJson: String): SavedServersDecodeResult {
+    return runCatching {
+        val array = JSONArray(rawJson)
+        val usedIds = mutableSetOf<String>()
+        val servers = mutableListOf<NxiwNetworkServer>()
+        var normalized = false
+
+        for (index in 0 until array.length()) {
+            val obj = array.getJSONObject(index)
+            val rawId = obj.optString("id", "").trim()
+            val id = if (rawId.isBlank() || rawId in usedIds) {
+                normalized = true
+                UUID.randomUUID().toString()
+            } else {
+                rawId
+            }
+            usedIds += id
+            servers += NxiwNetworkServer(
+                id = id,
+                name = obj.optString("name"),
+                ip = obj.optString("ip").trim(),
+                password = obj.optString("password").trim()
+            )
+        }
+
+        SavedServersDecodeResult(servers, normalized)
+    }.getOrElse {
+        SavedServersDecodeResult(emptyList(), false)
+    }
+}
+
+fun nodeMatchesActiveConfig(server: NxiwNetworkServer, peer: String, password: String): Boolean {
+    return peer.trim().isNotBlank() &&
+        normalizeNodeEndpoint(server.ip) == normalizeNodeEndpoint(peer.trim()) &&
+        server.password.trim() == password.trim()
+}
+
+fun nodeMatchesActiveEndpoint(server: NxiwNetworkServer, peer: String): Boolean {
+    return peer.trim().isNotBlank() &&
+        normalizeNodeEndpoint(server.ip) == normalizeNodeEndpoint(peer.trim())
+}
 
 fun captchaModeForMethod(method: String): String = when (method) {
     "rjs_classic" -> "rjs"
@@ -196,6 +262,7 @@ fun SettingsTab() {
     val sni by settingsStore.sni.collectAsStateWithLifecycle("")
     val connPass by settingsStore.connectionPassword.collectAsStateWithLifecycle("")
     val protocol by settingsStore.protocol.collectAsStateWithLifecycle("udp")
+    val selectedServerId by settingsStore.selectedServerId.collectAsStateWithLifecycle("")
     val wrapTransport by settingsStore.wrapTransport.collectAsStateWithLifecycle(false)
     val captchaMethod by settingsStore.captchaSolveMethod.collectAsStateWithLifecycle("manual")
     val savedServersJson by settingsStore.savedServersJson.collectAsStateWithLifecycle("[]")
@@ -214,8 +281,10 @@ fun SettingsTab() {
     }
 
     val serverList = remember { mutableStateListOf<NxiwNetworkServer>() }
-    var activeWidgetList by remember { mutableStateOf(listOf<WidgetType>()) }
-    var availableWidgetList by remember { mutableStateOf(listOf<WidgetType>()) }
+    var activeWidgetList by remember { mutableStateOf(parseDashboardWidgets(dashboardWidgetsRaw)) }
+    var availableWidgetList by remember {
+        mutableStateOf(WidgetType.entries.filter { it.isUserWidget } - activeWidgetList.toSet())
+    }
 
     LaunchedEffect(dashboardWidgetsRaw, dashboardNodeWidgetMigrated) {
         var active = parseDashboardWidgets(dashboardWidgetsRaw)
@@ -231,19 +300,21 @@ fun SettingsTab() {
     }
 
     LaunchedEffect(savedServersJson) {
+        val decoded = decodeSavedServersJson(savedServersJson)
         serverList.clear()
-        try {
-            val array = JSONArray(savedServersJson)
-            for (i in 0 until array.length()) {
-                val obj = array.getJSONObject(i)
-                serverList.add(NxiwNetworkServer(obj.optString("id", UUID.randomUUID().toString()), obj.optString("name"), obj.optString("ip").trim(), obj.optString("password").trim()))
-            }
-        } catch (_: Exception) {}
+        serverList.addAll(decoded.servers)
+        if (decoded.normalized) {
+            settingsStore.saveServersList(encodeSavedServers(decoded.servers))
+        }
     }
 
     val activePeer = peer.trim()
-    val activeServer by remember(activePeer) {
-        derivedStateOf { serverList.find { normalizeNodeEndpoint(it.ip) == normalizeNodeEndpoint(activePeer) } }
+    val activeServer by remember(activePeer, connPass, selectedServerId) {
+        derivedStateOf {
+            serverList.firstOrNull { it.id == selectedServerId && nodeMatchesActiveConfig(it, activePeer, connPass) }
+                ?: serverList.firstOrNull { nodeMatchesActiveConfig(it, activePeer, connPass) }
+                ?: serverList.firstOrNull { nodeMatchesActiveEndpoint(it, activePeer) }
+        }
     }
 
     var showDiagnosticDialog by remember { mutableStateOf(false) }
@@ -396,6 +467,7 @@ private fun DashboardWidgetsSection(
     var dropAnimationTarget by remember { mutableStateOf<Offset?>(null) }
     var pendingDropWidgetList by remember { mutableStateOf<List<WidgetType>?>(null) }
     var placementAnimationsEnabled by remember { mutableStateOf(false) }
+    var dragOverlayReady by remember { mutableStateOf(false) }
     val isDropAnimating = dropAnimationTarget != null
     val dragAnimationSpec = if (isDropAnimating) {
         tween<Float>(durationMillis = 190, easing = FastOutSlowInEasing)
@@ -414,13 +486,22 @@ private fun DashboardWidgetsSection(
         label = "dragOverlayY"
     )
     val dragOverlayScale by animateFloatAsState(
-        targetValue = if (isDropAnimating) 1f else 1.06f,
+        targetValue = 1f,
         animationSpec = tween(durationMillis = 190, easing = FastOutSlowInEasing),
         label = "dragOverlayScale"
     )
 
     LaunchedEffect(activeWidgetList) {
         if (draggingWidget == null && !awaitingDropTarget && dropAnimationTarget == null) previewWidgetList = activeWidgetList
+    }
+
+    LaunchedEffect(draggingWidget, draggedWidgetSize) {
+        if (draggingWidget != null && draggedWidgetSize != IntSize.Zero) {
+            withFrameNanos { }
+            dragOverlayReady = true
+        } else {
+            dragOverlayReady = false
+        }
     }
 
     LaunchedEffect(awaitingDropTarget, pendingDropWidgetList, draggingWidgetIndex) {
@@ -445,6 +526,7 @@ private fun DashboardWidgetsSection(
             }
             draggingWidget = null
             draggingWidgetIndex = null
+            dragOverlayReady = false
             dragVisualPosition = Offset.Zero
             draggedWidgetSize = IntSize.Zero
             awaitingDropTarget = false
@@ -459,6 +541,7 @@ private fun DashboardWidgetsSection(
         if (!isEditMode) {
             draggingWidget = null
             draggingWidgetIndex = null
+            dragOverlayReady = false
             dragVisualPosition = Offset.Zero
             draggedWidgetSize = IntSize.Zero
             awaitingDropTarget = false
@@ -470,13 +553,17 @@ private fun DashboardWidgetsSection(
     }
 
     @Composable
-    fun DashboardWidgetContent(widget: WidgetType, modifier: Modifier = Modifier) {
+    fun DashboardWidgetContent(widget: WidgetType, modifier: Modifier = Modifier, fillBounds: Boolean = false) {
+        fun fixedHeight(height: androidx.compose.ui.unit.Dp): Modifier {
+            return if (fillBounds) modifier.fillMaxSize() else modifier.height(height)
+        }
+
         when (widget) {
             WidgetType.NODE -> {
                 NodeDashboardCard(
                     activeServerName = activeServerName,
                     onDiagnosticsClick = onDiagnosticsClick,
-                    modifier = modifier.height(104.dp)
+                    modifier = fixedHeight(104.dp)
                 )
             }
             WidgetType.CONTROL -> {
@@ -486,7 +573,7 @@ private fun DashboardWidgetsSection(
                     cooldownSeconds = cooldownSeconds,
                     onProtocolSelected = onProtocolSelected,
                     onPowerClick = onPowerClick,
-                    modifier = modifier.wrapContentHeight()
+                    modifier = if (fillBounds) modifier.fillMaxSize() else modifier.wrapContentHeight()
                 )
             }
             WidgetType.GRAPH -> {
@@ -496,11 +583,11 @@ private fun DashboardWidgetsSection(
                     uploadSpeedBytes = currentUploadSpeed,
                     downloadSpeedBytes = currentDownloadSpeed,
                     points = displayedGraphPoints,
-                    modifier = modifier.height(160.dp)
+                    modifier = fixedHeight(160.dp)
                 )
             }
             else -> {
-                DashboardCard(title = widget.title, icon = widget.icon, modifier = modifier.height(130.dp)) {
+                DashboardCard(title = widget.title, icon = widget.icon, modifier = fixedHeight(130.dp)) {
                     val value = when (widget) {
                         WidgetType.PING -> if (tunnelRunning && currentPing > 0) "${currentPing} ms" else "--"
                         WidgetType.SESSION -> if (tunnelRunning) timerString else "00:00:00"
@@ -544,6 +631,7 @@ private fun DashboardWidgetsSection(
                         }
                         draggingWidget = draggableIndex?.let { previewWidgetList[it] }
                         draggingWidgetIndex = draggableIndex
+                        dragOverlayReady = false
                         dragVisualPosition = item?.offset?.let { Offset(it.x.toFloat(), it.y.toFloat()) } ?: Offset.Zero
                         draggedWidgetSize = item?.size ?: IntSize.Zero
                         awaitingDropTarget = false
@@ -593,6 +681,7 @@ private fun DashboardWidgetsSection(
                             }
                             draggingWidget = null
                             draggingWidgetIndex = null
+                            dragOverlayReady = false
                             dragVisualPosition = Offset.Zero
                             draggedWidgetSize = IntSize.Zero
                             awaitingDropTarget = false
@@ -601,6 +690,7 @@ private fun DashboardWidgetsSection(
                     onDragCancel = {
                         draggingWidget = null
                         draggingWidgetIndex = null
+                        dragOverlayReady = false
                         dragVisualPosition = Offset.Zero
                         draggedWidgetSize = IntSize.Zero
                         awaitingDropTarget = false
@@ -621,9 +711,14 @@ private fun DashboardWidgetsSection(
             val isDragging = draggingWidgetIndex == index
             val isDraggingAny = draggingWidget != null
             val canEditWidget = widget.isUserWidget
-            val rotate = if (isEditMode && canEditWidget && !isDragging && !isDraggingAny) (if (index % 2 == 0) jiggleRotation else -jiggleRotation) else 0f
-            val tx = if (isEditMode && canEditWidget && !isDragging && !isDraggingAny) (if (index % 3 == 0) jiggleTx else -jiggleTx) else 0f
-            val ty = if (isEditMode && canEditWidget && !isDragging && !isDraggingAny) (if (index % 2 != 0) jiggleTy else -jiggleTy) else 0f
+            val jiggleWeight by animateFloatAsState(
+                targetValue = if (isEditMode && canEditWidget && !isDragging && !isDraggingAny) 1f else 0f,
+                animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+                label = "widgetJiggleWeight_${widget.name}"
+            )
+            val rotate = (if (index % 2 == 0) jiggleRotation else -jiggleRotation) * jiggleWeight
+            val tx = (if (index % 3 == 0) jiggleTx else -jiggleTx) * jiggleWeight
+            val ty = (if (index % 2 != 0) jiggleTy else -jiggleTy) * jiggleWeight
             val placementModifier = if (placementAnimationsEnabled) {
                 Modifier.animateItem(placementSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing))
             } else {
@@ -633,7 +728,7 @@ private fun DashboardWidgetsSection(
             Box(
                 modifier = placementModifier
                     .graphicsLayer {
-                        alpha = if (isDragging) 0f else 1f
+                        alpha = if (isDragging && dragOverlayReady) 0f else 1f
                         rotationZ = rotate
                         translationX = tx.dp.toPx()
                         translationY = ty.dp.toPx()
@@ -675,24 +770,33 @@ private fun DashboardWidgetsSection(
                 } else {
                     dragVisualPosition
                 }
-                Box(
-                    modifier = Modifier
-                        .offset {
-                            IntOffset(
-                                overlayPosition.x.roundToInt(),
-                                overlayPosition.y.roundToInt()
-                            )
-                        }
-                        .width(overlayWidth)
-                        .height(overlayHeight)
-                        .zIndex(50f)
-                        .graphicsLayer {
-                            scaleX = dragOverlayScale
-                            scaleY = dragOverlayScale
-                            shadowElevation = 30f
-                        }
+                Popup(
+                    alignment = Alignment.TopStart,
+                    offset = IntOffset(
+                        overlayPosition.x.roundToInt(),
+                        overlayPosition.y.roundToInt()
+                    ),
+                    properties = PopupProperties(
+                        focusable = false,
+                        clippingEnabled = false
+                    )
                 ) {
-                    DashboardWidgetContent(widget)
+                    Box(
+                        modifier = Modifier
+                            .width(overlayWidth)
+                            .height(overlayHeight)
+                            .graphicsLayer {
+                                scaleX = dragOverlayScale
+                                scaleY = dragOverlayScale
+                                clip = false
+                            }
+                    ) {
+                        DashboardWidgetContent(
+                            widget = widget,
+                            modifier = Modifier.fillMaxSize(),
+                            fillBounds = true
+                        )
+                    }
                 }
             }
         }
@@ -715,7 +819,12 @@ private fun DashboardWidgetsSection(
             ) {
                 items(availableWidgetList, key = { it.name }, span = { if (it.isWide) GridItemSpan(maxLineSpan) else GridItemSpan(1) }) { widget ->
                     val index = availableWidgetList.indexOf(widget)
-                    val rotate = if (draggingWidget == null) (if (index % 2 == 0) -jiggleRotation else jiggleRotation) * 0.7f else 0f
+                    val jiggleWeight by animateFloatAsState(
+                        targetValue = if (draggingWidget == null) 1f else 0f,
+                        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+                        label = "availableWidgetJiggleWeight_${widget.name}"
+                    )
+                    val rotate = (if (index % 2 == 0) -jiggleRotation else jiggleRotation) * 0.7f * jiggleWeight
                     val placementModifier = if (placementAnimationsEnabled) Modifier.animateItem() else Modifier
 
                     Box(modifier = placementModifier.graphicsLayer { rotationZ = rotate; alpha = 0.8f }) {
@@ -1175,7 +1284,14 @@ private fun AnimatedDashboardValue(value: String) {
 }
 
 @Composable
-fun AddEditServerDialog(server: NxiwNetworkServer, onDismiss: () -> Unit, onSave: (NxiwNetworkServer) -> Unit, onDelete: () -> Unit) {
+fun AddEditServerDialog(
+    server: NxiwNetworkServer,
+    title: String? = null,
+    allowDelete: Boolean = true,
+    onDismiss: () -> Unit,
+    onSave: (NxiwNetworkServer) -> Unit,
+    onDelete: () -> Unit
+) {
     var name by remember { mutableStateOf(server.name) }
     var ip by remember { mutableStateOf(server.ip) }
     var pass by remember { mutableStateOf(server.password) }
@@ -1187,8 +1303,8 @@ fun AddEditServerDialog(server: NxiwNetworkServer, onDismiss: () -> Unit, onSave
         Surface(shape = RoundedCornerShape(28.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh, tonalElevation = 6.dp) {
             Column(modifier = Modifier.padding(24.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (isNew) "Новая нода" else "Настройки сервера", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                    if (!isNew) IconButton(onClick = onDelete) { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) }
+                    Text(title ?: if (isNew) "Новая нода" else "Настройки сервера", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    if (!isNew && allowDelete) IconButton(onClick = onDelete) { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) }
                 }
                 OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Имя (напр. Германия)", fontSize = 14.sp) }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp))
                 OutlinedTextField(
@@ -1210,6 +1326,11 @@ fun AddEditServerDialog(server: NxiwNetworkServer, onDismiss: () -> Unit, onSave
                     onValueChange = { pass = it.filter { c -> !c.isWhitespace() } },
                     label = { Text("Пароль от туннеля", fontSize = 14.sp) },
                     singleLine = true,
+                    keyboardOptions = KeyboardOptions(
+                        capitalization = KeyboardCapitalization.None,
+                        autoCorrectEnabled = false,
+                        keyboardType = KeyboardType.Password
+                    ),
                     visualTransformation = if (passVisible) VisualTransformation.None else PasswordVisualTransformation(),
                     trailingIcon = {
                         IconButton(onClick = { passVisible = !passVisible }) {

@@ -51,7 +51,9 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
@@ -582,19 +584,7 @@ class MainActivity : ComponentActivity() {
                 JSONArray()
             }
 
-            var existingIndex = -1
-            for (index in 0 until currentArray.length()) {
-                if (normalizeNodeEndpoint(currentArray.getJSONObject(index).optString("ip").trim()) == normalizeNodeEndpoint(formatNodeAddress(config.host, config.port))) {
-                    existingIndex = index
-                    break
-                }
-            }
-
-            val id = if (existingIndex != -1) {
-                currentArray.getJSONObject(existingIndex).optString("id", config.id)
-            } else {
-                config.id
-            }
+            val id = UUID.randomUUID().toString()
             val nodeJson = JSONObject().apply {
                 put("id", id)
                 put("name", config.name.trim())
@@ -604,7 +594,7 @@ class MainActivity : ComponentActivity() {
                 put("protocol", config.protocol)
             }
 
-            if (existingIndex != -1) currentArray.put(existingIndex, nodeJson) else currentArray.put(nodeJson)
+            currentArray.put(nodeJson)
             settingsStore.saveServersList(currentArray.toString())
 
             if (select) {
@@ -618,6 +608,7 @@ class MainActivity : ComponentActivity() {
                     sni = settingsStore.sni.first()
                 )
                 settingsStore.saveConnectionPassword(config.password.trim())
+                settingsStore.saveSelectedServerId(id)
             }
         }
     }
@@ -932,7 +923,20 @@ fun ImportNodePreviewDialog(
                         SegmentedButton(selected = protocol == "tcp", onClick = { protocol = "tcp" }, shape = SegmentedButtonDefaults.itemShape(1, 2)) { Text("TCP") }
                     }
                 }
-                OutlinedTextField(value = password, onValueChange = { password = it }, label = { Text("Пароль туннеля") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp))
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    label = { Text("Пароль туннеля") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    keyboardOptions = KeyboardOptions(
+                        capitalization = KeyboardCapitalization.None,
+                        autoCorrectEnabled = false,
+                        keyboardType = KeyboardType.Password
+                    ),
+                    visualTransformation = PasswordVisualTransformation()
+                )
 
                 val updated = ImportNodeConfig(
                     id = initialConfig.id,

@@ -41,6 +41,7 @@ class SettingsStore(context: Context) {
         private val THEME_MODE = stringPreferencesKey("theme_mode") 
         private val USE_DYNAMIC_COLOR = booleanPreferencesKey("use_dynamic_color") 
         private val SAVED_SERVERS = stringPreferencesKey("saved_servers_list")
+        private val SELECTED_SERVER_ID = stringPreferencesKey("selected_server_id")
         private val AUTO_CONNECT_ON_BOOT = booleanPreferencesKey("auto_connect_boot")
         private val CUSTOM_DNS = stringPreferencesKey("custom_dns")
         private val WRAP_TRANSPORT = booleanPreferencesKey("wrap_transport")
@@ -114,6 +115,7 @@ class SettingsStore(context: Context) {
     val themeMode: Flow<String> = dataStore.data.map { it[THEME_MODE] ?: "system" }
     val useDynamicColor: Flow<Boolean> = dataStore.data.map { it[USE_DYNAMIC_COLOR] ?: true }
     val savedServersJson: Flow<String> = dataStore.data.map { it[SAVED_SERVERS] ?: "[]" }
+    val selectedServerId: Flow<String> = dataStore.data.map { it[SELECTED_SERVER_ID] ?: "" }
     val autoConnectOnBoot: Flow<Boolean> = dataStore.data.map { it[AUTO_CONNECT_ON_BOOT] ?: false }
     val customDns: Flow<String> = dataStore.data.map { it[CUSTOM_DNS] ?: "default" }
     val wrapTransport: Flow<Boolean> = dataStore.data.map { it[WRAP_TRANSPORT] ?: false }
@@ -154,6 +156,7 @@ class SettingsStore(context: Context) {
     suspend fun saveThemeMode(mode: String) { dataStore.edit { prefs -> prefs[THEME_MODE] = mode } }
     suspend fun saveDynamicColor(enabled: Boolean) { dataStore.edit { prefs -> prefs[USE_DYNAMIC_COLOR] = enabled } }
     suspend fun saveServersList(jsonArrayString: String) { dataStore.edit { prefs -> prefs[SAVED_SERVERS] = jsonArrayString } }
+    suspend fun saveSelectedServerId(id: String) { dataStore.edit { prefs -> prefs[SELECTED_SERVER_ID] = id } }
     suspend fun save(peer: String, vkHashes: String, secondaryVkHash: String, workersPerHash: Int, protocol: String, listenPort: Int, sni: String = "") {
         dataStore.edit { prefs -> prefs[PEER] = peer; prefs[VK_HASHES] = normalizeVkHashList(vkHashes); prefs[SECONDARY_VK_HASH] = normalizeVkHashInput(secondaryVkHash); prefs[WORKERS_PER_HASH] = workersPerHash; prefs[PROTOCOL] = protocol; prefs[LISTEN_PORT] = listenPort; prefs[SNI] = sni }
     }

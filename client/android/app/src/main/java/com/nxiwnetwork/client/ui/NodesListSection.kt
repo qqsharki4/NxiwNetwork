@@ -42,6 +42,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.ToggleFloatingActionButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -60,9 +61,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nxiwnetwork.client.formatNodeAddress
 import com.nxiwnetwork.client.parseNodeAddress
 import com.nxiwnetwork.client.SettingsStore
-import com.nxiwnetwork.client.normalizeNodeEndpoint
 import kotlinx.coroutines.launch
-import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
 
@@ -81,25 +80,17 @@ fun NodesListSection(modifier: Modifier = Modifier) {
     val protocol by settingsStore.protocol.collectAsStateWithLifecycle("udp")
     val port by settingsStore.listenPort.collectAsStateWithLifecycle(9000)
     val sni by settingsStore.sni.collectAsStateWithLifecycle("")
+    val connectionPassword by settingsStore.connectionPassword.collectAsStateWithLifecycle("")
+    val selectedServerId by settingsStore.selectedServerId.collectAsStateWithLifecycle("")
     val savedServersJson by settingsStore.savedServersJson.collectAsStateWithLifecycle("[]")
 
     val serverList = remember { mutableStateListOf<NxiwNetworkServer>() }
     var serverToEdit by remember { mutableStateOf<NxiwNetworkServer?>(null) }
+    var serverToImportPreview by remember { mutableStateOf<NxiwNetworkServer?>(null) }
     var nodeFabExpanded by remember { mutableStateOf(false) }
 
     fun saveServers() {
-        val array = JSONArray()
-        serverList.forEach { server ->
-            array.put(
-                JSONObject().apply {
-                    put("id", server.id)
-                    put("name", server.name)
-                    put("ip", server.ip.trim())
-                    put("password", server.password.trim())
-                }
-            )
-        }
-        scope.launch { settingsStore.saveServersList(array.toString()) }
+        scope.launch { settingsStore.saveServersList(encodeSavedServers(serverList)) }
     }
 
     fun openNewNodeDialog() {
@@ -124,18 +115,7 @@ fun NodesListSection(modifier: Modifier = Modifier) {
             return
         }
 
-        val existingIndex = serverList.indexOfFirst { normalizeNodeEndpoint(it.ip) == normalizeNodeEndpoint(imported.ip) }
-        if (existingIndex == -1) {
-            serverList.add(imported)
-        } else {
-            serverList[existingIndex] = imported.copy(id = serverList[existingIndex].id)
-        }
-        saveServers()
-        Toast.makeText(
-            context,
-            if (existingIndex == -1) "Нода добавлена из буфера" else "Нода обновлена из буфера",
-            Toast.LENGTH_SHORT
-        ).show()
+        serverToImportPreview = imported.copy(id = UUID.randomUUID().toString())
     }
 
     fun openDeployNodePreview() {
@@ -145,22 +125,19 @@ fun NodesListSection(modifier: Modifier = Modifier) {
     }
 
     LaunchedEffect(savedServersJson) {
+        val decoded = decodeSavedServersJson(savedServersJson)
         serverList.clear()
-        try {
-            val array = JSONArray(savedServersJson)
-            for (index in 0 until array.length()) {
-                val obj = array.getJSONObject(index)
-                serverList.add(
-                    NxiwNetworkServer(
-                        id = obj.optString("id", UUID.randomUUID().toString()),
-                        name = obj.optString("name"),
-                        ip = obj.optString("ip").trim(),
-                        password = obj.optString("password").trim()
-                    )
-                )
-            }
-        } catch (_: Exception) {
-            // Keep the section usable if the stored list was corrupted.
+        serverList.addAll(decoded.servers)
+        if (decoded.normalized) {
+            settingsStore.saveServersList(encodeSavedServers(decoded.servers))
+        }
+    }
+
+    val activeSelectedServerId by remember(peer, connectionPassword, selectedServerId) {
+        derivedStateOf {
+            serverList.firstOrNull { it.id == selectedServerId && nodeMatchesActiveConfig(it, peer, connectionPassword) }?.id
+                ?: serverList.firstOrNull { nodeMatchesActiveConfig(it, peer, connectionPassword) }?.id
+                ?: ""
         }
     }
 
@@ -197,7 +174,7 @@ fun NodesListSection(modifier: Modifier = Modifier) {
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     items(serverList, key = { it.id }) { server ->
-                        val isSelected = normalizeNodeEndpoint(peer) == normalizeNodeEndpoint(server.ip)
+                        val isSelected = server.id == activeSelectedServerId
                         NodeListItem(
                             server = server,
                             selected = isSelected,
@@ -214,6 +191,7 @@ fun NodesListSection(modifier: Modifier = Modifier) {
                                         sni = sni
                                     )
                                     settingsStore.saveConnectionPassword(server.password.trim())
+                                    settingsStore.saveSelectedServerId(server.id)
                                 }
                             },
                             onEdit = {
@@ -274,7 +252,7 @@ fun NodesListSection(modifier: Modifier = Modifier) {
             onDismiss = { serverToEdit = null },
             onSave = { updated ->
                 val existingIndex = serverList.indexOfFirst { it.id == updated.id }
-                val wasSelected = normalizeNodeEndpoint(peer) == normalizeNodeEndpoint(editedServer.ip)
+                val wasSelected = activeSelectedServerId == editedServer.id
                 if (existingIndex == -1) {
                     serverList.add(updated)
                 } else {
@@ -293,6 +271,7 @@ fun NodesListSection(modifier: Modifier = Modifier) {
                             sni = sni
                         )
                         settingsStore.saveConnectionPassword(updated.password.trim())
+                        settingsStore.saveSelectedServerId(updated.id)
                     }
                 }
                 serverToEdit = null
@@ -300,14 +279,31 @@ fun NodesListSection(modifier: Modifier = Modifier) {
             onDelete = {
                 serverList.removeAll { it.id == editedServer.id }
                 saveServers()
-                if (normalizeNodeEndpoint(peer) == normalizeNodeEndpoint(editedServer.ip)) {
+                if (activeSelectedServerId == editedServer.id) {
                     scope.launch {
                         settingsStore.save("", hashes, secondaryHash, workers, protocol, port, sni)
                         settingsStore.saveConnectionPassword("")
+                        settingsStore.saveSelectedServerId("")
                     }
                 }
                 serverToEdit = null
             }
+        )
+    }
+
+    serverToImportPreview?.let { importedServer ->
+        AddEditServerDialog(
+            server = importedServer,
+            title = "Предпросмотр ноды",
+            allowDelete = false,
+            onDismiss = { serverToImportPreview = null },
+            onSave = { updated ->
+                serverList.add(updated.copy(id = UUID.randomUUID().toString()))
+                saveServers()
+                Toast.makeText(context, "Нода добавлена из буфера", Toast.LENGTH_SHORT).show()
+                serverToImportPreview = null
+            },
+            onDelete = { serverToImportPreview = null }
         )
     }
 }
@@ -337,7 +333,7 @@ private fun parseNodeClipboardText(text: String): NxiwNetworkServer? {
         val port = json.optInt("port", parsedAddress.port ?: 56000).coerceIn(1, 65535)
         val address = formatNodeAddress(parsedAddress.host, port)
         NxiwNetworkServer(
-            id = json.optString("id", UUID.randomUUID().toString()),
+            id = UUID.randomUUID().toString(),
             name = json.optString("name", "Импортированная нода").trim().ifBlank { "Импортированная нода" },
             ip = address,
             password = json.optString("password", json.optString("pass", "")).trim()
