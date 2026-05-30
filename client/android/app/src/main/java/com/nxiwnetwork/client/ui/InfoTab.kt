@@ -65,6 +65,7 @@ import com.nxiwnetwork.client.formatUpdatePublishedAgo
 import com.nxiwnetwork.client.normalizeVkHashFieldEdit
 import com.nxiwnetwork.client.normalizeVkHashInput
 import com.nxiwnetwork.client.normalizeVkHashList
+import com.nxiwnetwork.client.supportsWrapTransport
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -1017,7 +1018,7 @@ fun NetworkSettings(onBack: () -> Unit) {
     val customDnsIp by settingsStore.customDnsIp.collectAsStateWithLifecycle(initial.customDnsIp)
     val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
     val coreBackend = CoreBackend.fromId(coreBackendId)
-    val showWrapTransport = protocol == "udp" && coreBackend == CoreBackend.Go
+    val showWrapTransport = supportsWrapTransport(coreBackend, protocol)
 
     var lastMtu by remember(customMtu) { mutableIntStateOf(customMtu) }
     var animateProtocolSelection by remember { mutableStateOf(false) }

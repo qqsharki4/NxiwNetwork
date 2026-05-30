@@ -65,6 +65,8 @@ class SettingsStore(context: Context) {
         private val DASHBOARD_NODE_WIDGET_MIGRATED = booleanPreferencesKey("dashboard_node_widget_migrated")
         private val CORE_TRAFFIC_METRICS_UI = booleanPreferencesKey("core_traffic_metrics_ui")
         private val PING_METRICS_UI = booleanPreferencesKey("ping_metrics_ui")
+        private val ANDROID_PING_HOME_INTERVAL_MS = intPreferencesKey("android_ping_home_interval_ms")
+        private val ANDROID_PING_BACKGROUND_INTERVAL_MS = intPreferencesKey("android_ping_background_interval_ms")
         private val SPEED_METRIC_MODE = stringPreferencesKey("speed_metric_mode")
         private val GRAPH_SPEED_METRIC_MODE = stringPreferencesKey("graph_speed_metric_mode")
         private val MANUAL_CAPTCHA_OVERLAY = booleanPreferencesKey("manual_captcha_overlay")
@@ -72,6 +74,12 @@ class SettingsStore(context: Context) {
         private val SUPPRESS_BATTERY_OPTIMIZATION_PROMPT = booleanPreferencesKey("suppress_battery_optimization_prompt")
         const val DEFAULT_DASHBOARD_WIDGETS = "NODE,CONTROL,PING,SESSION,WORKERS,SPEED,GRAPH"
         const val DEFAULT_SPEED_METRIC_MODE = "total"
+        const val DEFAULT_ANDROID_PING_HOME_INTERVAL_MS = 1_600
+        const val DEFAULT_ANDROID_PING_BACKGROUND_INTERVAL_MS = 5 * 60 * 1000
+        const val MIN_ANDROID_PING_HOME_INTERVAL_MS = 500
+        const val MAX_ANDROID_PING_HOME_INTERVAL_MS = 10_000
+        const val MIN_ANDROID_PING_BACKGROUND_INTERVAL_MS = 60 * 1000
+        const val MAX_ANDROID_PING_BACKGROUND_INTERVAL_MS = 30 * 60 * 1000
         private val SPEED_METRIC_MODES = setOf("total", "up", "down")
 	
         // НОВЫЙ КЛЮЧ ДЛЯ MTU
@@ -124,6 +132,14 @@ class SettingsStore(context: Context) {
     val dashboardNodeWidgetMigrated: Flow<Boolean> = dataStore.data.map { it[DASHBOARD_NODE_WIDGET_MIGRATED] ?: false }
     val coreTrafficMetricsUi: Flow<Boolean> = dataStore.data.map { it[CORE_TRAFFIC_METRICS_UI] ?: true }
     val pingMetricsUi: Flow<Boolean> = dataStore.data.map { it[PING_METRICS_UI] ?: true }
+    val androidPingHomeIntervalMs: Flow<Int> = dataStore.data.map {
+        (it[ANDROID_PING_HOME_INTERVAL_MS] ?: DEFAULT_ANDROID_PING_HOME_INTERVAL_MS)
+            .coerceIn(MIN_ANDROID_PING_HOME_INTERVAL_MS, MAX_ANDROID_PING_HOME_INTERVAL_MS)
+    }
+    val androidPingBackgroundIntervalMs: Flow<Int> = dataStore.data.map {
+        (it[ANDROID_PING_BACKGROUND_INTERVAL_MS] ?: DEFAULT_ANDROID_PING_BACKGROUND_INTERVAL_MS)
+            .coerceIn(MIN_ANDROID_PING_BACKGROUND_INTERVAL_MS, MAX_ANDROID_PING_BACKGROUND_INTERVAL_MS)
+    }
     val speedMetricMode: Flow<String> = dataStore.data.map { normalizeSpeedMetricMode(it[SPEED_METRIC_MODE]) }
     val graphSpeedMetricMode: Flow<String> = dataStore.data.map { normalizeSpeedMetricMode(it[GRAPH_SPEED_METRIC_MODE]) }
     val manualCaptchaOverlay: Flow<Boolean> = dataStore.data.map { it[MANUAL_CAPTCHA_OVERLAY] ?: false }
@@ -195,6 +211,22 @@ class SettingsStore(context: Context) {
     suspend fun saveDashboardNodeWidgetMigrated(migrated: Boolean) { dataStore.edit { prefs -> prefs[DASHBOARD_NODE_WIDGET_MIGRATED] = migrated } }
     suspend fun saveCoreTrafficMetricsUi(enabled: Boolean) { dataStore.edit { prefs -> prefs[CORE_TRAFFIC_METRICS_UI] = enabled } }
     suspend fun savePingMetricsUi(enabled: Boolean) { dataStore.edit { prefs -> prefs[PING_METRICS_UI] = enabled } }
+    suspend fun saveAndroidPingHomeIntervalMs(intervalMs: Int) {
+        dataStore.edit { prefs ->
+            prefs[ANDROID_PING_HOME_INTERVAL_MS] = intervalMs.coerceIn(
+                MIN_ANDROID_PING_HOME_INTERVAL_MS,
+                MAX_ANDROID_PING_HOME_INTERVAL_MS
+            )
+        }
+    }
+    suspend fun saveAndroidPingBackgroundIntervalMs(intervalMs: Int) {
+        dataStore.edit { prefs ->
+            prefs[ANDROID_PING_BACKGROUND_INTERVAL_MS] = intervalMs.coerceIn(
+                MIN_ANDROID_PING_BACKGROUND_INTERVAL_MS,
+                MAX_ANDROID_PING_BACKGROUND_INTERVAL_MS
+            )
+        }
+    }
     suspend fun saveSpeedMetricMode(mode: String) { dataStore.edit { prefs -> prefs[SPEED_METRIC_MODE] = normalizeSpeedMetricMode(mode) } }
     suspend fun saveGraphSpeedMetricMode(mode: String) { dataStore.edit { prefs -> prefs[GRAPH_SPEED_METRIC_MODE] = normalizeSpeedMetricMode(mode) } }
     suspend fun saveManualCaptchaOverlay(enabled: Boolean) { dataStore.edit { prefs -> prefs[MANUAL_CAPTCHA_OVERLAY] = enabled } }

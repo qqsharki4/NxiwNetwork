@@ -35,6 +35,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nxiwnetwork.client.AppDiagnostics
 import com.nxiwnetwork.client.AppDiagnosticsSnapshot
+import com.nxiwnetwork.client.AndroidPingSchedule
 import com.nxiwnetwork.client.BatteryDiagnostics
 import com.nxiwnetwork.client.CoreBackend
 import com.nxiwnetwork.client.ProcessDiagnostics
@@ -44,6 +45,7 @@ import com.nxiwnetwork.client.TunnelManager
 import com.nxiwnetwork.client.TrafficDiagnostics
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlin.math.roundToInt
 
 @Composable
 internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
@@ -74,6 +76,8 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
     val dashboardWidgetsRaw by settingsStore.dashboardWidgets.collectAsStateWithLifecycle(SettingsStore.DEFAULT_DASHBOARD_WIDGETS)
     val coreTrafficMetricsUi by settingsStore.coreTrafficMetricsUi.collectAsStateWithLifecycle(true)
     val pingMetricsUi by settingsStore.pingMetricsUi.collectAsStateWithLifecycle(true)
+    val savedAndroidPingHomeIntervalMs by settingsStore.androidPingHomeIntervalMs.collectAsStateWithLifecycle(SettingsStore.DEFAULT_ANDROID_PING_HOME_INTERVAL_MS)
+    val savedAndroidPingBackgroundIntervalMs by settingsStore.androidPingBackgroundIntervalMs.collectAsStateWithLifecycle(SettingsStore.DEFAULT_ANDROID_PING_BACKGROUND_INTERVAL_MS)
     val speedMetricModeRaw by settingsStore.speedMetricMode.collectAsStateWithLifecycle(SettingsStore.DEFAULT_SPEED_METRIC_MODE)
     val graphSpeedMetricModeRaw by settingsStore.graphSpeedMetricMode.collectAsStateWithLifecycle(SettingsStore.DEFAULT_SPEED_METRIC_MODE)
     val manualCaptchaOverlay by settingsStore.manualCaptchaOverlay.collectAsStateWithLifecycle(false)
@@ -89,6 +93,7 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
     val activeWorkers by TunnelManager.activeWorkers.collectAsStateWithLifecycle()
     val stats by TunnelManager.stats.collectAsStateWithLifecycle()
     val pingMs by TunnelManager.currentPingMs.collectAsStateWithLifecycle()
+    val androidPingSchedule by TunnelManager.androidPingSchedule.collectAsStateWithLifecycle()
     val speedBytes by TunnelManager.currentSpeedBytes.collectAsStateWithLifecycle()
     val logs by TunnelManager.logs.collectAsStateWithLifecycle()
     val unreadErrors by TunnelManager.unreadErrorCount.collectAsStateWithLifecycle()
@@ -96,6 +101,10 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
 
     LaunchedEffect(appContext) {
         AppDiagnostics.start(appContext)
+    }
+
+    LaunchedEffect(savedAndroidPingHomeIntervalMs, savedAndroidPingBackgroundIntervalMs) {
+        TunnelManager.setAndroidPingSchedule(savedAndroidPingHomeIntervalMs, savedAndroidPingBackgroundIntervalMs)
     }
 
     val versionCode = remember(appContext) { readAppVersionCode(appContext) }
@@ -160,6 +169,7 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
         dashboardWidgetsRaw,
         coreTrafficMetricsUi,
         pingMetricsUi,
+        androidPingSchedule,
         speedMetricModeRaw,
         graphSpeedMetricModeRaw,
         manualCaptchaOverlay,
@@ -198,6 +208,7 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
             dashboardWidgets = dashboardWidgets,
             coreTrafficMetricsUi = coreTrafficMetricsUi,
             pingMetricsUi = pingMetricsUi,
+            androidPingSchedule = androidPingSchedule,
             speedMetricMode = speedMetricMode,
             graphSpeedMetricMode = graphSpeedMetricMode,
             manualCaptchaOverlay = manualCaptchaOverlay,
@@ -302,6 +313,48 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                         TunnelManager.setPingMetricsEnabled(enabled)
                         scope.launch { settingsStore.savePingMetricsUi(enabled) }
+                    }
+                    DebugInfoRow("Android ping scheduler", formatAndroidPingSchedule(pingMetricsUi, androidPingSchedule))
+                    DebugPingIntervalRow(
+                        title = "Ping на Главной",
+                        description = "Интервал системного ping, когда открыт главный экран.",
+                        valueMs = androidPingSchedule.homeIntervalMs,
+                        minMs = SettingsStore.MIN_ANDROID_PING_HOME_INTERVAL_MS,
+                        maxMs = SettingsStore.MAX_ANDROID_PING_HOME_INTERVAL_MS,
+                        stepMs = 100,
+                        enabled = pingMetricsUi,
+                        onRuntimeChange = { value ->
+                            TunnelManager.setAndroidPingSchedule(value, androidPingSchedule.backgroundIntervalMs)
+                        },
+                        onCommit = { value ->
+                            scope.launch { settingsStore.saveAndroidPingHomeIntervalMs(value) }
+                        }
+                    )
+                    DebugPingIntervalRow(
+                        title = "Ping в фоне",
+                        description = "Интервал ping, когда экран включён, но Главная не открыта.",
+                        valueMs = androidPingSchedule.backgroundIntervalMs,
+                        minMs = SettingsStore.MIN_ANDROID_PING_BACKGROUND_INTERVAL_MS,
+                        maxMs = SettingsStore.MAX_ANDROID_PING_BACKGROUND_INTERVAL_MS,
+                        stepMs = 60_000,
+                        enabled = pingMetricsUi,
+                        onRuntimeChange = { value ->
+                            TunnelManager.setAndroidPingSchedule(androidPingSchedule.homeIntervalMs, value)
+                        },
+                        onCommit = { value ->
+                            scope.launch { settingsStore.saveAndroidPingBackgroundIntervalMs(value) }
+                        }
+                    )
+                    DebugToolButton(Icons.Default.Restore, "Сбросить Android ping", "Вернёт 1.6 сек на Главной и 5 мин в фоне.") {
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        TunnelManager.setAndroidPingSchedule(
+                            SettingsStore.DEFAULT_ANDROID_PING_HOME_INTERVAL_MS,
+                            SettingsStore.DEFAULT_ANDROID_PING_BACKGROUND_INTERVAL_MS
+                        )
+                        scope.launch {
+                            settingsStore.saveAndroidPingHomeIntervalMs(SettingsStore.DEFAULT_ANDROID_PING_HOME_INTERVAL_MS)
+                            settingsStore.saveAndroidPingBackgroundIntervalMs(SettingsStore.DEFAULT_ANDROID_PING_BACKGROUND_INTERVAL_MS)
+                        }
                     }
                     DebugSpeedMetricModeRow("Что показывает виджет скорости", "Режим для карточки «Скорость».", speedMetricMode) { mode ->
                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
@@ -603,6 +656,26 @@ private fun extractPolicyMtu(raw: String): String? {
     return Regex("""mtu:([0-9]+-[0-9]+)""").find(raw)?.groupValues?.getOrNull(1)
 }
 
+private fun snapPingIntervalMs(raw: Float, minMs: Int, maxMs: Int, stepMs: Int): Int {
+    val relative = (raw.roundToInt() - minMs).coerceAtLeast(0)
+    val snapped = minMs + ((relative + stepMs / 2) / stepMs) * stepMs
+    return snapped.coerceIn(minMs, maxMs)
+}
+
+private fun formatPingInterval(ms: Int): String {
+    return if (ms < 60_000) {
+        String.format("%.1f сек", ms / 1000f)
+    } else {
+        val minutes = ms / 60_000
+        "$minutes мин"
+    }
+}
+
+private fun formatAndroidPingSchedule(enabled: Boolean, schedule: AndroidPingSchedule): String {
+    if (!enabled) return "выключен"
+    return "Главная ${formatPingInterval(schedule.homeIntervalMs)} / фон ${formatPingInterval(schedule.backgroundIntervalMs)} / экран off: off"
+}
+
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun DebugMaterial3ExpressivePreview() {
@@ -883,6 +956,58 @@ private fun DebugSwitchRow(title: String, description: String, checked: Boolean,
 }
 
 @Composable
+private fun DebugPingIntervalRow(
+    title: String,
+    description: String,
+    valueMs: Int,
+    minMs: Int,
+    maxMs: Int,
+    stepMs: Int,
+    enabled: Boolean,
+    onRuntimeChange: (Int) -> Unit,
+    onCommit: (Int) -> Unit
+) {
+    var sliderValue by remember(valueMs) { mutableFloatStateOf(valueMs.toFloat()) }
+    val snappedValue = snapPingIntervalMs(sliderValue, minMs, maxMs, stepMs)
+    val steps = (((maxMs - minMs) / stepMs) - 1).coerceAtLeast(0)
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp)
+    ) {
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                Text(title, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(3.dp))
+                Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 17.sp)
+            }
+            Text(
+                formatPingInterval(snappedValue),
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        Slider(
+            value = sliderValue,
+            onValueChange = { raw ->
+                val snapped = snapPingIntervalMs(raw, minMs, maxMs, stepMs)
+                sliderValue = snapped.toFloat()
+                onRuntimeChange(snapped)
+            },
+            onValueChangeFinished = {
+                onCommit(snapPingIntervalMs(sliderValue, minMs, maxMs, stepMs))
+            },
+            enabled = enabled,
+            valueRange = minMs.toFloat()..maxMs.toFloat(),
+            steps = steps
+        )
+    }
+}
+
+@Composable
 private fun DebugSpeedMetricModeRow(
     title: String,
     description: String,
@@ -971,6 +1096,7 @@ private fun buildDebugSnapshot(
     dashboardWidgets: List<WidgetType>,
     coreTrafficMetricsUi: Boolean,
     pingMetricsUi: Boolean,
+    androidPingSchedule: AndroidPingSchedule,
     speedMetricMode: SpeedMetricMode,
     graphSpeedMetricMode: SpeedMetricMode,
     manualCaptchaOverlay: Boolean,
@@ -1004,6 +1130,7 @@ private fun buildDebugSnapshot(
     appendLine("Dashboard widgets: ${dashboardWidgets.joinToString(",") { it.name }}")
     appendLine("Core traffic metrics UI: $coreTrafficMetricsUi")
     appendLine("Ping metrics UI: $pingMetricsUi")
+    appendLine("Android ping schedule: ${formatAndroidPingSchedule(pingMetricsUi, androidPingSchedule)}")
     appendLine("Speed metric mode: ${speedMetricMode.id}")
     appendLine("Graph speed metric mode: ${graphSpeedMetricMode.id}")
     appendLine("Manual captcha overlay: enabled=$manualCaptchaOverlay permission=$overlayPermissionGranted")

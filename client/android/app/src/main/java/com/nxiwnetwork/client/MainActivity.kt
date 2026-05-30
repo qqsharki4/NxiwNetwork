@@ -112,12 +112,14 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         activeActivities++
+        TunnelManager.setAppForeground(true)
         ManlCaptchaWebViewManager.checkAndShowPendingCaptcha(this)
     }
 
     override fun onStop() {
         super.onStop()
-        activeActivities--
+        activeActivities = (activeActivities - 1).coerceAtLeast(0)
+        TunnelManager.setAppForeground(activeActivities > 0)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -988,7 +990,13 @@ fun MainScreen(onPageChanged: (Int) -> Unit = {}) {
 
     LaunchedEffect(pagerState.currentPage) {
         onPageChanged(pagerState.currentPage)
+        TunnelManager.setDashboardVisible(pagerState.currentPage == 0)
         if (pagerState.currentPage == 3) TunnelManager.clearUnreadErrors()
+    }
+
+    DisposableEffect(Unit) {
+        TunnelManager.setDashboardVisible(pagerState.currentPage == 0)
+        onDispose { TunnelManager.setDashboardVisible(false) }
     }
 
     Scaffold(

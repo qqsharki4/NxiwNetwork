@@ -60,3 +60,10 @@ fun resolveCoreBackend(nativeLibraryDir: String, requested: CoreBackend): CoreBa
         fellBackToGo = requested != CoreBackend.Go
     )
 }
+
+fun supportsWrapTransport(backend: CoreBackend, protocol: String): Boolean {
+    return when (backend) {
+        CoreBackend.Go,
+        CoreBackend.Rust -> protocol != "tcp"
+    }
+}

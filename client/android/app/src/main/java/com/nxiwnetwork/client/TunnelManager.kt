@@ -4,6 +4,7 @@ import android.appwidget.AppWidgetManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.os.PowerManager
 import android.os.SystemClock
 import androidx.compose.runtime.Stable
 import kotlinx.coroutines.CoroutineScope
@@ -19,8 +20,13 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.BufferedReader
 import java.io.InputStreamReader
+
+private const val PING_HOME_LOOP_DELAY_MS = 400L
+private const val PING_BACKGROUND_LOOP_DELAY_MS = 10_000L
+private const val PING_SCREEN_OFF_LOOP_DELAY_MS = 30_000L
 
 @Stable
 data class LogEntry(
@@ -47,6 +53,12 @@ data class CoreTrafficMetrics(
     val totalBytes: Long get() = totalUpBytes + totalDownBytes
     val speedBytesPerSecond: Long get() = upBytesPerSecond + downBytesPerSecond
 }
+
+@Stable
+data class AndroidPingSchedule(
+    val homeIntervalMs: Int = SettingsStore.DEFAULT_ANDROID_PING_HOME_INTERVAL_MS,
+    val backgroundIntervalMs: Int = SettingsStore.DEFAULT_ANDROID_PING_BACKGROUND_INTERVAL_MS
+)
 
 object TunnelManager {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -100,6 +112,41 @@ object TunnelManager {
     val downloadTrafficGraphPoints = MutableStateFlow(List(30) { 0f })
     val coreTrafficMetricsUiEnabled = MutableStateFlow(true)
     val pingMetricsEnabled = MutableStateFlow(true)
+    val androidPingSchedule = MutableStateFlow(AndroidPingSchedule())
+    private val appForeground = MutableStateFlow(false)
+    private val dashboardVisible = MutableStateFlow(false)
+    private val pingScheduleSignal = MutableStateFlow(0L)
+
+    fun setAppForeground(foreground: Boolean) {
+        if (appForeground.value != foreground) {
+            appForeground.value = foreground
+            pingScheduleSignal.value = SystemClock.elapsedRealtime()
+        }
+    }
+
+    fun setDashboardVisible(visible: Boolean) {
+        if (dashboardVisible.value != visible) {
+            dashboardVisible.value = visible
+            pingScheduleSignal.value = SystemClock.elapsedRealtime()
+        }
+    }
+
+    fun setAndroidPingSchedule(homeIntervalMs: Int, backgroundIntervalMs: Int) {
+        val next = AndroidPingSchedule(
+            homeIntervalMs = homeIntervalMs.coerceIn(
+                SettingsStore.MIN_ANDROID_PING_HOME_INTERVAL_MS,
+                SettingsStore.MAX_ANDROID_PING_HOME_INTERVAL_MS
+            ),
+            backgroundIntervalMs = backgroundIntervalMs.coerceIn(
+                SettingsStore.MIN_ANDROID_PING_BACKGROUND_INTERVAL_MS,
+                SettingsStore.MAX_ANDROID_PING_BACKGROUND_INTERVAL_MS
+            )
+        )
+        if (androidPingSchedule.value != next) {
+            androidPingSchedule.value = next
+            pingScheduleSignal.value = SystemClock.elapsedRealtime()
+        }
+    }
 
     private fun updateWidgetState() {
         val ctx = lastContext ?: return
@@ -154,34 +201,78 @@ object TunnelManager {
     private fun startMetricsMonitor(ip: String) {
         metricsJob?.cancel()
         metricsJob = scope.launch(Dispatchers.IO) {
-            var loopCount = 0
+            var lastPingAt = 0L
+            var lastSignal = pingScheduleSignal.value
             
             while (isActive && running.value) {
-                if (loopCount % 5 == 0 && pingMetricsEnabled.value) {
-                    scope.launch(Dispatchers.IO) {
-                        try {
-                            val process = Runtime.getRuntime().exec("ping -c 1 -W 1 $ip")
-                            val reader = BufferedReader(InputStreamReader(process.inputStream))
-                            var ping = 0
-                            reader.forEachLine { line ->
-                                if (line.contains("time=")) {
-                                    val timeStr = line.substringAfter("time=").substringBefore(" ms")
-                                    ping = timeStr.toFloatOrNull()?.toInt() ?: 0
-                                }
-                            }
-                            process.waitFor()
-                            if (ping > 0) currentPingMs.value = ping
-                        } catch (e: Exception) {
-                            currentPingMs.value = 0
-                        }
-                    }
-                } else if (!pingMetricsEnabled.value) {
-                    currentPingMs.value = 0
+                val signal = pingScheduleSignal.value
+                if (signal != lastSignal) {
+                    lastSignal = signal
+                    lastPingAt = 0L
                 }
-                
-                delay(1000)
-                loopCount++
+
+                if (!pingMetricsEnabled.value) {
+                    currentPingMs.value = 0
+                    awaitPingScheduleDelay(PING_BACKGROUND_LOOP_DELAY_MS, lastSignal)
+                    continue
+                }
+
+                if (!isScreenInteractive()) {
+                    awaitPingScheduleDelay(PING_SCREEN_OFF_LOOP_DELAY_MS, lastSignal)
+                    continue
+                }
+
+                val schedule = androidPingSchedule.value
+                val homeVisible = (appForeground.value || MainActivity.isForeground) && dashboardVisible.value
+                val intervalMs = if (homeVisible) schedule.homeIntervalMs.toLong() else schedule.backgroundIntervalMs.toLong()
+                val now = SystemClock.elapsedRealtime()
+                if (lastPingAt == 0L || now - lastPingAt >= intervalMs) {
+                    lastPingAt = now
+                    currentPingMs.value = measurePing(ip)
+                }
+
+                val delayMs = if (homeVisible) {
+                    PING_HOME_LOOP_DELAY_MS
+                } else {
+                    PING_BACKGROUND_LOOP_DELAY_MS
+                }
+                awaitPingScheduleDelay(delayMs, lastSignal)
             }
+        }
+    }
+
+    private suspend fun awaitPingScheduleDelay(delayMs: Long, signal: Long) {
+        withTimeoutOrNull(delayMs) {
+            pingScheduleSignal.first { it != signal }
+        }
+    }
+
+    private fun isScreenInteractive(): Boolean {
+        val context = lastContext ?: return true
+        val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        return powerManager?.isInteractive ?: true
+    }
+
+    private fun measurePing(ip: String): Int {
+        var process: Process? = null
+        return try {
+            val proc = Runtime.getRuntime().exec(arrayOf("ping", "-c", "1", "-W", "1", ip))
+            process = proc
+            var ping = 0
+            BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
+                reader.forEachLine { line ->
+                    if (line.contains("time=")) {
+                        val timeStr = line.substringAfter("time=").substringBefore(" ms")
+                        ping = timeStr.toFloatOrNull()?.toInt() ?: 0
+                    }
+                }
+            }
+            proc.waitFor()
+            if (ping > 0) ping else 0
+        } catch (_: Exception) {
+            0
+        } finally {
+            process?.destroy()
         }
     }
 
@@ -209,7 +300,10 @@ object TunnelManager {
     }
 
     fun setPingMetricsEnabled(enabled: Boolean) {
-        pingMetricsEnabled.value = enabled
+        if (pingMetricsEnabled.value != enabled) {
+            pingMetricsEnabled.value = enabled
+            pingScheduleSignal.value = SystemClock.elapsedRealtime()
+        }
         if (!enabled) currentPingMs.value = 0
     }
 
@@ -345,6 +439,10 @@ object TunnelManager {
                 val requestedBackend = CoreBackend.fromId(settingsStore.coreBackend.first())
                 setCoreTrafficMetricsUiEnabled(settingsStore.coreTrafficMetricsUi.first())
                 setPingMetricsEnabled(settingsStore.pingMetricsUi.first())
+                setAndroidPingSchedule(
+                    settingsStore.androidPingHomeIntervalMs.first(),
+                    settingsStore.androidPingBackgroundIntervalMs.first()
+                )
                 val backendResolution = resolveCoreBackend(context.applicationInfo.nativeLibraryDir, requestedBackend)
                 val binaryFile = backendResolution.binaryFile
                 
@@ -401,7 +499,8 @@ object TunnelManager {
                     cmd.add(params.connectionPassword)
                 }
 
-                val wrapSupported = backendResolution.active == CoreBackend.Go && params.protocol != "tcp"
+                val wrapSupported = supportsWrapTransport(requestedBackend, params.protocol) &&
+                    supportsWrapTransport(backendResolution.active, params.protocol)
                 if (params.wrapTransport && wrapSupported) {
                     if (params.connectionPassword.isBlank()) {
                         updateLog("wrap_no_password", "[WRAP] Нужен пароль подключения", 20, true)
@@ -409,8 +508,6 @@ object TunnelManager {
                         cmd.add("-wrap")
                         updateLog("wrap_transport", "[WRAP] OBFS включен", 20)
                     }
-                } else if (params.wrapTransport) {
-                    updateLog("wrap_backend", "[WRAP] Доступен только для Go-ядра с UDP", 20, true)
                 }
 
                 cmd.add(if (params.protocol == "tcp") "-tcp" else "-udp")
