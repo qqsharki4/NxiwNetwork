@@ -395,6 +395,7 @@ private fun DashboardWidgetsSection(
     var awaitingDropTarget by remember { mutableStateOf(false) }
     var dropAnimationTarget by remember { mutableStateOf<Offset?>(null) }
     var pendingDropWidgetList by remember { mutableStateOf<List<WidgetType>?>(null) }
+    var placementAnimationsEnabled by remember { mutableStateOf(false) }
     val isDropAnimating = dropAnimationTarget != null
     val dragAnimationSpec = if (isDropAnimating) {
         tween<Float>(durationMillis = 190, easing = FastOutSlowInEasing)
@@ -450,6 +451,7 @@ private fun DashboardWidgetsSection(
             dropAnimationTarget = null
             pendingDropWidgetList = null
             previewWidgetList = finalList
+            placementAnimationsEnabled = false
         }
     }
 
@@ -463,6 +465,7 @@ private fun DashboardWidgetsSection(
             dropAnimationTarget = null
             pendingDropWidgetList = null
             previewWidgetList = activeWidgetList
+            placementAnimationsEnabled = false
         }
     }
 
@@ -536,6 +539,9 @@ private fun DashboardWidgetsSection(
                         val draggableIndex = item?.index?.takeIf { index ->
                             previewWidgetList.getOrNull(index)?.isUserWidget == true
                         }
+                        if (draggableIndex != null) {
+                            placementAnimationsEnabled = true
+                        }
                         draggingWidget = draggableIndex?.let { previewWidgetList[it] }
                         draggingWidgetIndex = draggableIndex
                         dragVisualPosition = item?.offset?.let { Offset(it.x.toFloat(), it.y.toFloat()) } ?: Offset.Zero
@@ -601,6 +607,7 @@ private fun DashboardWidgetsSection(
                         dropAnimationTarget = null
                         pendingDropWidgetList = null
                         previewWidgetList = activeWidgetList
+                        placementAnimationsEnabled = false
                     }
                 )
             },
@@ -617,10 +624,14 @@ private fun DashboardWidgetsSection(
             val rotate = if (isEditMode && canEditWidget && !isDragging && !isDraggingAny) (if (index % 2 == 0) jiggleRotation else -jiggleRotation) else 0f
             val tx = if (isEditMode && canEditWidget && !isDragging && !isDraggingAny) (if (index % 3 == 0) jiggleTx else -jiggleTx) else 0f
             val ty = if (isEditMode && canEditWidget && !isDragging && !isDraggingAny) (if (index % 2 != 0) jiggleTy else -jiggleTy) else 0f
+            val placementModifier = if (placementAnimationsEnabled) {
+                Modifier.animateItem(placementSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing))
+            } else {
+                Modifier
+            }
 
             Box(
-                modifier = Modifier
-                    .animateItem(placementSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing))
+                modifier = placementModifier
                     .graphicsLayer {
                         alpha = if (isDragging) 0f else 1f
                         rotationZ = rotate
@@ -639,6 +650,7 @@ private fun DashboardWidgetsSection(
                     Surface(
                         onClick = {
                             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            placementAnimationsEnabled = true
                             onUpdateWidgetOrder(activeWidgetList - widget)
                         },
                         shape = CircleShape,
@@ -704,8 +716,9 @@ private fun DashboardWidgetsSection(
                 items(availableWidgetList, key = { it.name }, span = { if (it.isWide) GridItemSpan(maxLineSpan) else GridItemSpan(1) }) { widget ->
                     val index = availableWidgetList.indexOf(widget)
                     val rotate = if (draggingWidget == null) (if (index % 2 == 0) -jiggleRotation else jiggleRotation) * 0.7f else 0f
+                    val placementModifier = if (placementAnimationsEnabled) Modifier.animateItem() else Modifier
 
-                    Box(modifier = Modifier.animateItem().graphicsLayer { rotationZ = rotate; alpha = 0.8f }) {
+                    Box(modifier = placementModifier.graphicsLayer { rotationZ = rotate; alpha = 0.8f }) {
                         Surface(modifier = Modifier.fillMaxWidth().height(if (widget.isWide) 80.dp else 130.dp), shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
                             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
                                 Icon(widget.icon, null, modifier = Modifier.size(28.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -716,6 +729,7 @@ private fun DashboardWidgetsSection(
                         Surface(
                             onClick = {
                                 haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                placementAnimationsEnabled = true
                                 onUpdateWidgetOrder(activeWidgetList + widget)
                             },
                             shape = CircleShape,
