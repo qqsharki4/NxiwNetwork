@@ -24,6 +24,7 @@ use webrtc_dtls::config::{Config, ExtendedMasterSecretType};
 use webrtc_dtls::conn::DTLSConn;
 use webrtc_dtls::crypto::Certificate;
 
+mod obfs;
 mod tcp_turn_conn;
 
 use tcp_turn_conn::TcpTurnConn;
@@ -64,6 +65,7 @@ struct CoreArgs {
     mtu: u16,
     device_id: String,
     password: String,
+    wrap_transport: bool,
     user_agent: String,
     captcha_mode: String,
     keepalive: Duration,
@@ -117,6 +119,8 @@ struct Dispatcher {
 struct PeerConn {
     relay: Arc<dyn Conn + Send + Sync>,
     peer: SocketAddr,
+    wrap: Option<Arc<obfs::ObfsCodec>>,
+    wrap_send_buf: Mutex<Vec<u8>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -197,6 +201,10 @@ async fn run() -> Result<()> {
     println!("[КЛИЕНТ] Device ID: {}", args.device_id);
     println!("[КЛИЕНТ] Обход капчи: {}", args.captcha_mode);
     println!("[КЛИЕНТ] Keepalive: {} сек", args.keepalive.as_secs());
+    println!(
+        "[КЛИЕНТ] WRAP/OBFS: {}",
+        if args.wrap_transport { "ON" } else { "OFF" }
+    );
     if args.split_tunnel {
         println!("[КЛИЕНТ] Split tunnel: включён");
     }
@@ -264,6 +272,7 @@ fn parse_core_args(args: &[String]) -> Result<CoreArgs> {
     let mut mtu = 0u16;
     let mut device_id = "unknown".to_string();
     let mut password = String::new();
+    let mut wrap_transport = false;
     let mut user_agent = "Mozilla/5.0".to_string();
     let mut captcha_mode = "rjs".to_string();
     let mut keepalive_seconds = 10u64;
@@ -296,6 +305,7 @@ fn parse_core_args(args: &[String]) -> Result<CoreArgs> {
             "-port" => turn_port = Some(next_value(args, &mut index)),
             "-vk-app-id" => vk_app_id = next_value(args, &mut index),
             "-vk-app-secret" => vk_app_secret = next_value(args, &mut index),
+            "-wrap" => wrap_transport = true,
             "-udp" => use_udp = true,
             "-tcp" => use_tcp = true,
             "-split" => split_tunnel = true,
@@ -317,6 +327,9 @@ fn parse_core_args(args: &[String]) -> Result<CoreArgs> {
     }
     workers = workers.clamp(1, 72);
     keepalive_seconds = keepalive_seconds.clamp(5, 60);
+    if wrap_transport && password.is_empty() {
+        bail!("[КЛИЕНТ] WRAP: empty password");
+    }
 
     Ok(CoreArgs {
         peer,
@@ -332,6 +345,7 @@ fn parse_core_args(args: &[String]) -> Result<CoreArgs> {
         mtu,
         device_id,
         password,
+        wrap_transport,
         user_agent,
         captcha_mode,
         keepalive: Duration::from_secs(keepalive_seconds),
@@ -1511,7 +1525,20 @@ async fn run_session(
     );
 
     let relay: Arc<dyn Conn + Send + Sync> = Arc::new(relay);
-    let peer_conn: Arc<dyn Conn + Send + Sync> = Arc::new(PeerConn { relay, peer });
+    let wrap = if args.wrap_transport {
+        let key = obfs::derive_wrap_key(&args.password).context("WRAP key")?;
+        Some(Arc::new(obfs::ObfsCodec::new(key).context("WRAP codec")?))
+    } else {
+        None
+    };
+    let peer_conn: Arc<dyn Conn + Send + Sync> = Arc::new(PeerConn {
+        relay,
+        peer,
+        wrap,
+        wrap_send_buf: Mutex::new(Vec::with_capacity(obfs::ObfsCodec::max_wire_len(
+            READ_BUF_SIZE,
+        ))),
+    });
     let sni = if params.sni.is_empty() {
         "calls.okcdn.ru".to_string()
     } else {
@@ -3123,6 +3150,12 @@ impl Conn for PeerConn {
         loop {
             let (n, from) = self.relay.recv_from(buf).await?;
             if from == self.peer {
+                if let Some(wrap) = &self.wrap {
+                    match wrap.unwrap_packet_in_place(&mut buf[..n]) {
+                        Ok(m) => return Ok(m),
+                        Err(_) => continue,
+                    }
+                }
                 return Ok(n);
             }
         }
@@ -3134,10 +3167,20 @@ impl Conn for PeerConn {
     }
 
     async fn send(&self, buf: &[u8]) -> util::Result<usize> {
-        self.relay.send_to(buf, self.peer).await
+        self.send_to(buf, self.peer).await
     }
 
     async fn send_to(&self, buf: &[u8], target: SocketAddr) -> util::Result<usize> {
+        if target == self.peer {
+            if let Some(wrap) = &self.wrap {
+                let mut wire = self.wrap_send_buf.lock().await;
+                let wire_len = wrap
+                    .wrap_packet_to(buf, &mut wire)
+                    .map_err(|err| util::Error::Other(format!("obfs wrap: {err}")))?;
+                self.relay.send_to(&wire[..wire_len], target).await?;
+                return Ok(buf.len());
+            }
+        }
         self.relay.send_to(buf, target).await
     }
 
