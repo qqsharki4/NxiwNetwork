@@ -530,6 +530,8 @@ object TunnelManager {
                 cmd.add(if (params.protocol == "tcp") "-tcp" else "-udp")
                 cmd.add("-captcha-mode")
                 cmd.add(params.captchaMode)
+                cmd.add("-fingerprint")
+                cmd.add(settingsStore.trafficFingerprint.first())
 
                 var userAgent = settingsStore.userAgent.first()
                 if (userAgent.isEmpty() || forceRegenerateUA) {

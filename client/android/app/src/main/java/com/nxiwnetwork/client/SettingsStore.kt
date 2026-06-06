@@ -45,6 +45,7 @@ class SettingsStore(context: Context) {
         private val AUTO_CONNECT_ON_BOOT = booleanPreferencesKey("auto_connect_boot")
         private val CUSTOM_DNS = stringPreferencesKey("custom_dns")
         private val WRAP_TRANSPORT = booleanPreferencesKey("wrap_transport")
+        private val TRAFFIC_FINGERPRINT = stringPreferencesKey("traffic_fingerprint")
         private val WIFI_HIGH_PERFORMANCE = booleanPreferencesKey("wifi_high_performance")
         private val CLIENT_KEEPALIVE_SECONDS = intPreferencesKey("client_keepalive_seconds")
         private val CORE_BACKEND = stringPreferencesKey("core_backend")
@@ -75,6 +76,7 @@ class SettingsStore(context: Context) {
         private val SUPPRESS_BATTERY_OPTIMIZATION_PROMPT = booleanPreferencesKey("suppress_battery_optimization_prompt")
         const val DEFAULT_DASHBOARD_WIDGETS = "NODE,CONTROL,PING,SESSION,WORKERS,SPEED,GRAPH"
         const val DEFAULT_SPEED_METRIC_MODE = "total"
+        const val DEFAULT_TRAFFIC_FINGERPRINT = "auto"
         const val DEFAULT_ANDROID_PING_HOME_INTERVAL_MS = 1_600
         const val DEFAULT_ANDROID_PING_BACKGROUND_INTERVAL_MS = 5 * 60 * 1000
         const val MIN_ANDROID_PING_HOME_INTERVAL_MS = 500
@@ -82,6 +84,7 @@ class SettingsStore(context: Context) {
         const val MIN_ANDROID_PING_BACKGROUND_INTERVAL_MS = 60 * 1000
         const val MAX_ANDROID_PING_BACKGROUND_INTERVAL_MS = 30 * 60 * 1000
         private val SPEED_METRIC_MODES = setOf("total", "up", "down")
+        private val TRAFFIC_FINGERPRINTS = setOf("auto", "chrome", "safari", "firefox")
 	
         // НОВЫЙ КЛЮЧ ДЛЯ MTU
         private val CUSTOM_MTU = intPreferencesKey("custom_mtu")
@@ -119,6 +122,7 @@ class SettingsStore(context: Context) {
     val autoConnectOnBoot: Flow<Boolean> = dataStore.data.map { it[AUTO_CONNECT_ON_BOOT] ?: false }
     val customDns: Flow<String> = dataStore.data.map { it[CUSTOM_DNS] ?: "default" }
     val wrapTransport: Flow<Boolean> = dataStore.data.map { it[WRAP_TRANSPORT] ?: false }
+    val trafficFingerprint: Flow<String> = dataStore.data.map { normalizeTrafficFingerprint(it[TRAFFIC_FINGERPRINT]) }
     val wifiHighPerformance: Flow<Boolean> = dataStore.data.map { it[WIFI_HIGH_PERFORMANCE] ?: true }
     val clientKeepaliveSeconds: Flow<Int> = dataStore.data.map { it[CLIENT_KEEPALIVE_SECONDS] ?: 10 }
     val coreBackend: Flow<String> = dataStore.data.map { CoreBackend.normalize(it[CORE_BACKEND]) }
@@ -177,6 +181,7 @@ class SettingsStore(context: Context) {
     suspend fun saveAutoConnect(enabled: Boolean) { dataStore.edit { prefs -> prefs[AUTO_CONNECT_ON_BOOT] = enabled } }
     suspend fun saveCustomDns(dns: String) { dataStore.edit { prefs -> prefs[CUSTOM_DNS] = dns } }
     suspend fun saveWrapTransport(enabled: Boolean) { dataStore.edit { prefs -> prefs[WRAP_TRANSPORT] = enabled } }
+    suspend fun saveTrafficFingerprint(fingerprint: String) { dataStore.edit { prefs -> prefs[TRAFFIC_FINGERPRINT] = normalizeTrafficFingerprint(fingerprint) } }
     suspend fun saveWifiHighPerformance(enabled: Boolean) { dataStore.edit { prefs -> prefs[WIFI_HIGH_PERFORMANCE] = enabled } }
     suspend fun saveClientKeepaliveSeconds(seconds: Int) { dataStore.edit { prefs -> prefs[CLIENT_KEEPALIVE_SECONDS] = seconds.coerceIn(5, 60) } }
     suspend fun saveCoreBackend(backend: String) { dataStore.edit { prefs -> prefs[CORE_BACKEND] = CoreBackend.normalize(backend) } }
@@ -270,5 +275,10 @@ class SettingsStore(context: Context) {
     private fun normalizeSpeedMetricMode(mode: String?): String {
         val normalized = mode?.lowercase().orEmpty()
         return if (normalized in SPEED_METRIC_MODES) normalized else DEFAULT_SPEED_METRIC_MODE
+    }
+
+    private fun normalizeTrafficFingerprint(fingerprint: String?): String {
+        val normalized = fingerprint?.lowercase().orEmpty()
+        return if (normalized in TRAFFIC_FINGERPRINTS) normalized else DEFAULT_TRAFFIC_FINGERPRINT
     }
 }

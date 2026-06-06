@@ -115,6 +115,7 @@ private data class VkHashFieldUi(
 private data class NetworkSettingsSnapshot(
     val protocol: String,
     val wrapTransport: Boolean,
+    val trafficFingerprint: String,
     val coreBackend: String,
     val customMtu: Int,
     val dnsType: String,
@@ -1001,6 +1002,7 @@ fun NetworkSettings(onBack: () -> Unit) {
         NetworkSettingsSnapshot(
             protocol = "udp",
             wrapTransport = false,
+            trafficFingerprint = SettingsStore.DEFAULT_TRAFFIC_FINGERPRINT,
             coreBackend = CoreBackend.Go.id,
             customMtu = 0,
             dnsType = "default",
@@ -1012,6 +1014,7 @@ fun NetworkSettings(onBack: () -> Unit) {
         settingsStore.protocol.map { if (it == "tcp") "tcp" else "udp" }
     }.collectAsStateWithLifecycle(initial.protocol)
     val wrapTransport by settingsStore.wrapTransport.collectAsStateWithLifecycle(initial.wrapTransport)
+    val trafficFingerprint by settingsStore.trafficFingerprint.collectAsStateWithLifecycle(initial.trafficFingerprint)
     val coreBackendId by settingsStore.coreBackend.collectAsStateWithLifecycle(initial.coreBackend)
     val customMtu by settingsStore.customMtu.collectAsStateWithLifecycle(initial.customMtu)
     val dnsType by remember(settingsStore) {
@@ -1024,6 +1027,7 @@ fun NetworkSettings(onBack: () -> Unit) {
 
     var lastMtu by remember(customMtu) { mutableIntStateOf(customMtu) }
     var animateProtocolSelection by remember { mutableStateOf(false) }
+    var animateFingerprintSelection by remember { mutableStateOf(false) }
     var animateMtuValue by remember { mutableStateOf(false) }
     var animateDnsSelection by remember { mutableStateOf(false) }
 
@@ -1101,6 +1105,29 @@ fun NetworkSettings(onBack: () -> Unit) {
                             }
                         )
                     }
+                }
+            }
+            HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+            Text("Fingerprint", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            Spacer(Modifier.height(12.dp))
+            SingleChoiceSegmentedButtonRow(
+                modifier = Modifier.fillMaxWidth().height(SEGMENTED_CONTROL_HEIGHT)
+            ) {
+                listOf("auto" to "Авто", "chrome" to "Chrome", "safari" to "Safari", "firefox" to "Firefox").forEachIndexed { i, (v, l) ->
+                    val selected = trafficFingerprint == v
+                    SegmentedButton(
+                        selected = selected,
+                        shape = SegmentedButtonDefaults.itemShape(index = i, count = 4),
+                        icon = { SegmentedSelectionIcon(selected, animateFingerprintSelection) },
+                        onClick = {
+                            if (trafficFingerprint != v) {
+                                animateFingerprintSelection = true
+                                if (tunnelRunning) showTunnelRestartToast()
+                            }
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            scope.launch { settingsStore.saveTrafficFingerprint(v) }
+                        }
+                    ) { Text(l, fontSize = 11.sp, maxLines = 1) }
                 }
             }
             HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
