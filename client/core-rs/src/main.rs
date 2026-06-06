@@ -99,7 +99,33 @@ struct Stats {
     total_bytes_up: AtomicI64,
     total_bytes_down: AtomicI64,
     dropped_packets: AtomicI64,
+    dropped_no_workers: AtomicI64,
+    dropped_worker_queue: AtomicI64,
+    dropped_no_client: AtomicI64,
+    dropped_local_write: AtomicI64,
     creds_errors: AtomicI64,
+}
+
+impl Stats {
+    fn drop_no_workers(&self) {
+        self.dropped_packets.fetch_add(1, Ordering::Relaxed);
+        self.dropped_no_workers.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn drop_worker_queue(&self) {
+        self.dropped_packets.fetch_add(1, Ordering::Relaxed);
+        self.dropped_worker_queue.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn drop_no_client(&self) {
+        self.dropped_packets.fetch_add(1, Ordering::Relaxed);
+        self.dropped_no_client.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn drop_local_write(&self) {
+        self.dropped_packets.fetch_add(1, Ordering::Relaxed);
+        self.dropped_local_write.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 #[derive(Clone)]
@@ -483,13 +509,17 @@ async fn stats_loop(stats: Arc<Stats>, mut shutdown_rx: watch::Receiver<bool>) {
                 let up = stats.total_bytes_up.load(Ordering::Relaxed);
                 let down = stats.total_bytes_down.load(Ordering::Relaxed);
                 let dropped = stats.dropped_packets.load(Ordering::Relaxed);
+                let drop_no_workers = stats.dropped_no_workers.load(Ordering::Relaxed);
+                let drop_worker_queue = stats.dropped_worker_queue.load(Ordering::Relaxed);
+                let drop_no_client = stats.dropped_no_client.load(Ordering::Relaxed);
+                let drop_local_write = stats.dropped_local_write.load(Ordering::Relaxed);
                 let now = std::time::Instant::now();
                 let elapsed_seconds = now.duration_since(last_time).as_secs_f64().max(1.0);
                 let up_bps = (((up - last_up) as f64) / elapsed_seconds).max(0.0) as i64;
                 let down_bps = (((down - last_down) as f64) / elapsed_seconds).max(0.0) as i64;
                 let up_pps = (((packets_up - last_packets_up) as f64) / elapsed_seconds).max(0.0) as i64;
                 let down_pps = (((packets_down - last_packets_down) as f64) / elapsed_seconds).max(0.0) as i64;
-                println!("[CORE_METRICS] active={active} total_up={up} total_down={down} up_bps={up_bps} down_bps={down_bps} packets_up={packets_up} packets_down={packets_down} up_pps={up_pps} down_pps={down_pps} drops={dropped}");
+                println!("[CORE_METRICS] active={active} total_up={up} total_down={down} up_bps={up_bps} down_bps={down_bps} packets_up={packets_up} packets_down={packets_down} up_pps={up_pps} down_pps={down_pps} drops={dropped} drop_no_workers={drop_no_workers} drop_worker_queue={drop_worker_queue} drop_no_client={drop_no_client} drop_local_write={drop_local_write}");
 
                 let total_mb = (up + down) as f64 / (1024.0 * 1024.0);
                 let up_mb = up as f64 / (1024.0 * 1024.0);
@@ -598,12 +628,12 @@ impl Dispatcher {
         let mut workers = match self.workers.lock() {
             Ok(workers) => workers,
             Err(_) => {
-                self.stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
+                self.stats.drop_worker_queue();
                 return;
             }
         };
         if workers.is_empty() {
-            self.stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
+            self.stats.drop_no_workers();
             return;
         }
 
@@ -628,7 +658,7 @@ impl Dispatcher {
         }
 
         let Some(mut index) = best_idx else {
-            self.stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
+            self.stats.drop_worker_queue();
             return;
         };
 
@@ -640,19 +670,19 @@ impl Dispatcher {
                     .store(index.wrapping_add(1), Ordering::Relaxed);
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
-                self.stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
+                self.stats.drop_worker_queue();
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 workers.remove(index);
                 if workers.is_empty() {
-                    self.stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
+                    self.stats.drop_no_workers();
                     return;
                 }
                 if index >= workers.len() {
                     index = 0;
                 }
                 self.rr_index.store(index, Ordering::Relaxed);
-                self.stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
+                self.stats.drop_worker_queue();
             }
         }
     }
@@ -673,7 +703,7 @@ impl Dispatcher {
                     let Some(packet) = packet else { return; };
                     let addr = self.client_addr.lock().ok().and_then(|client_addr| *client_addr);
                     let Some(addr) = addr else {
-                        self.stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
+                        self.stats.drop_no_client();
                         continue;
                     };
                     match self.socket.send_to(packet.as_ref(), addr).await {
@@ -682,7 +712,7 @@ impl Dispatcher {
                             self.stats.packets_down.fetch_add(1, Ordering::Relaxed);
                         }
                         Err(_) => {
-                            self.stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
+                            self.stats.drop_local_write();
                         }
                     }
                 }
