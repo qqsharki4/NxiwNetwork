@@ -24,9 +24,11 @@ use webrtc_dtls::config::{Config, ExtendedMasterSecretType};
 use webrtc_dtls::conn::DTLSConn;
 use webrtc_dtls::crypto::Certificate;
 
+mod botgen;
 mod obfs;
 mod tcp_turn_conn;
 
+use botgen::BotProfile;
 use tcp_turn_conn::TcpTurnConn;
 
 const DEFAULT_VK_APP_ID: &str = "6287487";
@@ -2305,9 +2307,15 @@ async fn get_vk_creds_with_retries(
     captcha_tx: broadcast::Sender<String>,
 ) -> Result<Credentials> {
     let mut last_err: Option<anyhow::Error> = None;
+    let action_seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0)
+        ^ hash.len() as u64;
+    let profile = botgen::generate_bot_profile(&args.user_agent, hash, action_seed);
 
     for attempt in 0..MAX_CREDS_RETRIES {
-        match get_vk_creds_once(args, hash, captcha_tx.clone()).await {
+        match get_vk_creds_once(args, hash, captcha_tx.clone(), &profile).await {
             Ok(creds) => return Ok(creds),
             Err(err) => {
                 let text = err.to_string();
@@ -2357,12 +2365,12 @@ async fn get_vk_creds_once(
     args: &CoreArgs,
     hash: &str,
     captcha_tx: broadcast::Sender<String>,
+    profile: &BotProfile,
 ) -> Result<Credentials> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
         .build()
         .context("создание HTTP клиента")?;
-    let name = "NxiwNetwork";
 
     let step1 = post_form(
         &client,
@@ -2371,7 +2379,7 @@ async fn get_vk_creds_once(
             "client_secret={}&client_id={}&scopes=audio_anonymous%2Cvideo_anonymous%2Cphotos_anonymous%2Cprofile_anonymous&isApiOauthAnonymEnabled=false&version=1&app_id={}",
             args.vk_app_secret, args.vk_app_id, args.vk_app_id
         ),
-        args,
+        profile,
     )
     .await
     .context("шаг 1")?;
@@ -2385,7 +2393,7 @@ async fn get_vk_creds_once(
             "client_id={}&token_type=messages&payload={}&client_secret={}&version=1&app_id={}",
             args.vk_app_id, token1, args.vk_app_secret, args.vk_app_id
         ),
-        args,
+        profile,
     )
     .await
     .context("шаг 2")?;
@@ -2394,13 +2402,13 @@ async fn get_vk_creds_once(
 
     let mut step3_data = format!(
         "vk_join_link=https://vk.com/call/join/{hash}&name={}&access_token={token3}",
-        urlencoding::encode(name)
+        urlencoding::encode(&profile.name)
     );
     let mut step3 = post_form(
         &client,
         "https://api.vk.ru/method/calls.getAnonymousToken?v=5.264",
         &step3_data,
-        args,
+        profile,
     )
     .await
     .context("шаг 3")?;
@@ -2414,7 +2422,7 @@ async fn get_vk_creds_once(
                 used_cache = true;
                 token
             } else {
-                let token = solve_captcha(args, &captcha, captcha_tx).await?;
+                let token = solve_captcha(args, &captcha, captcha_tx, profile).await?;
                 println!("[КАПЧА] Сохраняю success_token в кэш для 4 следующих групп");
                 push_cached_captcha_token(token.clone(), 4);
                 token
@@ -2426,7 +2434,7 @@ async fn get_vk_creds_once(
             };
             step3_data = format!(
                 "vk_join_link=https://vk.com/call/join/{hash}&name={}&access_token={token3}&captcha_key=&captcha_sid={}&is_sound_captcha=0&success_token={}&captcha_ts={}&captcha_attempt={}",
-                urlencoding::encode(name),
+                urlencoding::encode(&profile.name),
                 captcha.sid,
                 urlencoding::encode(&success_token),
                 captcha.ts,
@@ -2436,7 +2444,7 @@ async fn get_vk_creds_once(
                 &client,
                 "https://api.vk.ru/method/calls.getAnonymousToken?v=5.264",
                 &step3_data,
-                args,
+                profile,
             )
             .await
             .context("шаг 3 после капчи")?;
@@ -2468,7 +2476,7 @@ async fn get_vk_creds_once(
             uuid::Uuid::new_v4(),
             OK_APP_KEY
         ),
-        args,
+        profile,
     )
     .await
     .context("шаг 4")?;
@@ -2481,7 +2489,7 @@ async fn get_vk_creds_once(
         &format!(
             "joinLink={hash}&isVideo=false&protocolVersion=5&anonymToken={token4}&method=vchat.joinConversationByLink&format=JSON&application_key={OK_APP_KEY}&session_key={session_key}"
         ),
-        args,
+        profile,
     )
     .await
     .context("шаг 5")?;
@@ -2538,18 +2546,15 @@ async fn post_form(
     client: &reqwest::Client,
     url: &str,
     body: &str,
-    args: &CoreArgs,
+    profile: &BotProfile,
 ) -> Result<Value> {
     let mut request = client
         .post(url)
-        .header("User-Agent", &args.user_agent)
+        .header("User-Agent", &profile.user_agent)
         .header("Content-Type", "application/x-www-form-urlencoded")
-        .header("sec-ch-ua-platform", "\"Android\"")
-        .header(
-            "sec-ch-ua",
-            "\"Not(A:Brand\";v=\"99\", \"Android WebView\";v=\"133\", \"Chromium\";v=\"133\"",
-        )
-        .header("sec-ch-ua-mobile", "?1")
+        .header("sec-ch-ua-platform", &profile.sec_ch_ua_platform)
+        .header("sec-ch-ua", &profile.sec_ch_ua)
+        .header("sec-ch-ua-mobile", &profile.sec_ch_ua_mobile)
         .header("Sec-Fetch-Site", "cross-site")
         .header("Sec-Fetch-Mode", "cors")
         .header("Sec-Fetch-Dest", "empty")
@@ -2665,6 +2670,7 @@ async fn solve_captcha(
     args: &CoreArgs,
     captcha: &CaptchaError,
     captcha_tx: broadcast::Sender<String>,
+    profile: &BotProfile,
 ) -> Result<String> {
     match args.captcha_mode.as_str() {
         "wv" => {
@@ -2673,7 +2679,7 @@ async fn solve_captcha(
         }
         "rjs_slider" => {
             println!("[КАПЧА] Режим: RJS Slider (Rust: classic first, WV fallback)");
-            match solve_captcha_via_rjs_classic(args, captcha).await {
+            match solve_captcha_via_rjs_classic(args, captcha, profile).await {
                 Ok(token) => Ok(token),
                 Err(err) => {
                     println!("[КАПЧА] RJS Slider fallback: classic не прошёл: {err:#}");
@@ -2683,14 +2689,19 @@ async fn solve_captcha(
         }
         _ => {
             println!("[КАПЧА] Режим: RJS Classic");
-            solve_captcha_via_rjs_classic(args, captcha).await
+            solve_captcha_via_rjs_classic(args, captcha, profile).await
         }
     }
 }
 
-async fn solve_captcha_via_rjs_classic(args: &CoreArgs, captcha: &CaptchaError) -> Result<String> {
+async fn solve_captcha_via_rjs_classic(
+    args: &CoreArgs,
+    captcha: &CaptchaError,
+    profile: &BotProfile,
+) -> Result<String> {
     println!("[КАПЧА] RJS: Загрузка страницы капчи...");
-    let (pow_input, difficulty) = fetch_pow_input(&captcha.redirect_uri, &args.user_agent).await?;
+    let (pow_input, difficulty) =
+        fetch_pow_input(&captcha.redirect_uri, &profile.user_agent).await?;
     let mut rng = SimpleRng::new(captcha_seed(args, captcha));
     let timing = CaptchaTiming::generate(&mut rng);
 
@@ -2707,7 +2718,7 @@ async fn solve_captcha_via_rjs_classic(args: &CoreArgs, captcha: &CaptchaError) 
     time::sleep(Duration::from_millis(timing.fetch_pow_ms)).await;
 
     println!("[КАПЧА] RJS: Отправка данных...");
-    let token = call_captcha_not_robot(args, &captcha.session_token, &hash, &mut rng, &timing)
+    let token = call_captcha_not_robot(&captcha.session_token, &hash, &mut rng, &timing, profile)
         .await
         .context("ошибка captchaNotRobot API")?;
 
@@ -2717,7 +2728,8 @@ async fn solve_captcha_via_rjs_classic(args: &CoreArgs, captcha: &CaptchaError) 
         "session_token={}&domain=vk.com&adFp=&access_token=",
         urlencoding::encode(&captcha.session_token)
     );
-    let _ = captcha_api_request("captchaNotRobot.endSession", &base, captcha_user_agent()).await;
+    let captcha_headers = botgen::captcha_browser_profile(profile);
+    let _ = captcha_api_request("captchaNotRobot.endSession", &base, &captcha_headers).await;
 
     println!("[КАПЧА] RJS: Капча решена успешно ✓");
     Ok(token)
@@ -2779,21 +2791,30 @@ fn solve_pow(pow_input: &str, difficulty: usize) -> String {
 }
 
 async fn call_captcha_not_robot(
-    args: &CoreArgs,
     session_token: &str,
     hash: &str,
     rng: &mut SimpleRng,
     timing: &CaptchaTiming,
+    profile: &BotProfile,
 ) -> Result<String> {
-    let captcha_browser_fp = format!("{:016x}{:016x}", rng.next_u64(), rng.next_u64());
-    let captcha_device_json = r#"{"screenWidth":1920,"screenHeight":1080,"screenAvailWidth":1920,"screenAvailHeight":1032,"innerWidth":1920,"innerHeight":945,"devicePixelRatio":1,"language":"en-US","languages":["en-US"],"webdriver":false,"hardwareConcurrency":16,"deviceMemory":8,"connectionEffectiveType":"4g","notificationsPermission":"denied"}"#;
+    let captcha_headers = botgen::captcha_browser_profile(profile);
+    let captcha_browser_fp = if profile.browser_fp.trim().is_empty() {
+        format!("{:016x}{:016x}", rng.next_u64(), rng.next_u64())
+    } else {
+        profile.browser_fp.clone()
+    };
+    let captcha_device_json = if profile.device_json.trim().is_empty() {
+        r#"{"screenWidth":1920,"screenHeight":1080,"screenAvailWidth":1920,"screenAvailHeight":1032,"innerWidth":1920,"innerHeight":945,"devicePixelRatio":1,"language":"en-US","languages":["en-US"],"webdriver":false,"hardwareConcurrency":16,"deviceMemory":8,"connectionEffectiveType":"4g","notificationsPermission":"denied"}"#.to_string()
+    } else {
+        profile.device_json.clone()
+    };
     let base = format!(
         "session_token={}&domain=vk.com&adFp=&access_token=",
         urlencoding::encode(session_token)
     );
 
     println!("[КАПЧА]   Шаг 1/4: settings...");
-    captcha_api_request("captchaNotRobot.settings", &base, captcha_user_agent()).await?;
+    captcha_api_request("captchaNotRobot.settings", &base, &captcha_headers).await?;
 
     println!("[КАПЧА]   ...пауза: изучение виджета...");
     time::sleep(Duration::from_millis(timing.settings_to_component_ms)).await;
@@ -2802,12 +2823,12 @@ async fn call_captcha_not_robot(
     let component_done = format!(
         "{base}&browser_fp={}&device={}",
         captcha_browser_fp,
-        urlencoding::encode(captcha_device_json)
+        urlencoding::encode(&captcha_device_json)
     );
     captcha_api_request(
         "captchaNotRobot.componentDone",
         &component_done,
-        captcha_user_agent(),
+        &captcha_headers,
     )
     .await?;
 
@@ -2822,20 +2843,19 @@ async fn call_captcha_not_robot(
     let answer = base64::engine::general_purpose::STANDARD.encode(b"{}");
     let check_data = format!(
         "{base}&accelerometer={}&gyroscope={}&motion={}&cursor={}&taps={}&connectionRtt={}&connectionDownlink={}&browser_fp={}&hash={}&answer={}&debug_info={}",
-        urlencoding::encode("[]"),
-        urlencoding::encode("[]"),
-        urlencoding::encode("[]"),
-        urlencoding::encode(&generate_captcha_cursor(rng)),
-        urlencoding::encode("[]"),
+        urlencoding::encode(&profile.accelerometer),
+        urlencoding::encode(&profile.gyroscope),
+        urlencoding::encode(&profile.motion),
+        urlencoding::encode(&profile.cursor_json),
+        urlencoding::encode(&profile.taps),
         urlencoding::encode(&generate_connection_rtt(rng)),
-        urlencoding::encode(&generate_downlink(rng)),
+        urlencoding::encode(&profile.downlink),
         captcha_browser_fp,
         hash,
         answer,
-        generate_debug_info(&args.device_id),
+        &profile.debug_info,
     );
-    let check =
-        captcha_api_request("captchaNotRobot.check", &check_data, captcha_user_agent()).await?;
+    let check = captcha_api_request("captchaNotRobot.check", &check_data, &captcha_headers).await?;
     let response = check
         .get("response")
         .and_then(Value::as_object)
@@ -2857,7 +2877,11 @@ async fn call_captcha_not_robot(
     Ok(token.to_string())
 }
 
-async fn captcha_api_request(method: &str, body: &str, user_agent: &str) -> Result<Value> {
+async fn captcha_api_request(
+    method: &str,
+    body: &str,
+    browser_profile: &botgen::BrowserProfile,
+) -> Result<Value> {
     let url = format!("https://api.vk.ru/method/{method}?v=5.131");
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
@@ -2865,16 +2889,13 @@ async fn captcha_api_request(method: &str, body: &str, user_agent: &str) -> Resu
         .context("создание HTTP клиента captcha API")?;
     let text = client
         .post(url)
-        .header("User-Agent", user_agent)
+        .header("User-Agent", &browser_profile.user_agent)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .header("Origin", "https://id.vk.ru")
         .header("Referer", "https://id.vk.ru/")
-        .header("sec-ch-ua-platform", "\"Windows\"")
-        .header(
-            "sec-ch-ua",
-            "\"Chromium\";v=\"146\", \"Not-A.Brand\";v=\"24\", \"Google Chrome\";v=\"146\"",
-        )
-        .header("sec-ch-ua-mobile", "?0")
+        .header("sec-ch-ua-platform", &browser_profile.sec_ch_ua_platform)
+        .header("sec-ch-ua", &browser_profile.sec_ch_ua)
+        .header("sec-ch-ua-mobile", &browser_profile.sec_ch_ua_mobile)
         .header("Sec-Fetch-Site", "same-site")
         .header("Sec-Fetch-Mode", "cors")
         .header("Sec-Fetch-Dest", "empty")
@@ -2890,10 +2911,6 @@ async fn captcha_api_request(method: &str, body: &str, user_agent: &str) -> Resu
         .await
         .with_context(|| format!("{method} response body"))?;
     serde_json::from_str(&text).with_context(|| format!("{method} JSON: {text}"))
-}
-
-fn captcha_user_agent() -> &'static str {
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 }
 
 fn generate_debug_info(device_id: &str) -> String {

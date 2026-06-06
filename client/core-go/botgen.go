@@ -32,6 +32,9 @@ var lastNames = []string{
 
 type BotProfile struct {
 	UserAgent       string
+	SecChUa         string
+	SecChUaMobile   string
+	SecChUaPlatform string
 	Name            string
 	BrowserFP       string
 	DeviceJSON      string
@@ -60,6 +63,7 @@ func GenerateBotProfile(realUserAgent, baseDeviceID string, actionSeed uint64) B
 	hwRng := rand.New(rand.NewSource(int64(hwSeed)))
 
 	actionRng := rand.New(rand.NewSource(int64(actionSeed)))
+	browserProfile, savedProfile := defaultBotBrowserProfile(realUserAgent)
 
 	wChoices := []int{720, 1080, 1440}
 	w := wChoices[hwRng.Intn(len(wChoices))]
@@ -89,6 +93,10 @@ func GenerateBotProfile(realUserAgent, baseDeviceID string, actionSeed uint64) B
 
 	browserFP := fmt.Sprintf("%016x%016x%016x%016x",
 		hwRng.Uint64(), hwRng.Uint64(), hwRng.Uint64(), hwRng.Uint64())
+	if savedProfile != nil {
+		deviceJSON = firstNonEmpty(savedProfile.DeviceJSON, deviceJSON)
+		browserFP = firstNonEmpty(savedProfile.BrowserFp, browserFP)
+	}
 
 	canvasFP := fmt.Sprintf("%08x", hwRng.Uint32())
 
@@ -104,18 +112,7 @@ func GenerateBotProfile(realUserAgent, baseDeviceID string, actionSeed uint64) B
 
 	touchSupport := fmt.Sprintf(`{"maxTouchPoints":%d,"touchEvent":true,"touchStart":true}`, 5+hwRng.Intn(6))
 
-	fn := firstNames[actionRng.Intn(len(firstNames))]
-	ln := lastNames[actionRng.Intn(len(lastNames))]
-	var name string
-	if actionRng.Float32() < 0.3 {
-		name = fn
-	} else {
-		lastChar := fn[len(fn)-2:]
-		if lastChar == "на" || lastChar == "ия" || lastChar == "да" || lastChar == "ра" {
-			ln = ln + "а"
-		}
-		name = fn + " " + ln
-	}
+	name := generateNameWithRng(actionRng)
 
 	cursor := "[]"
 
@@ -126,7 +123,10 @@ func GenerateBotProfile(realUserAgent, baseDeviceID string, actionSeed uint64) B
 	dl := generateDownlink(actionRng)
 
 	return BotProfile{
-		UserAgent:       realUserAgent,
+		UserAgent:       firstNonEmpty(browserProfile.UserAgent, strings.TrimSpace(realUserAgent), "Mozilla/5.0"),
+		SecChUa:         firstNonEmpty(browserProfile.SecChUa, `"Chromium";v="129", "Not-A.Brand";v="24", "Google Chrome";v="129"`),
+		SecChUaMobile:   firstNonEmpty(browserProfile.SecChUaMobile, "?1"),
+		SecChUaPlatform: firstNonEmpty(browserProfile.SecChUaPlatform, `"Android"`),
 		Name:            name,
 		BrowserFP:       browserFP,
 		DeviceJSON:      deviceJSON,
@@ -303,35 +303,35 @@ func SimulateHumanDelay(rng *rand.Rand, action string) {
 }
 
 type CaptchaSessionTiming struct {
-	FetchPowMs int
-	ReadCaptchaMs int
+	FetchPowMs            int
+	ReadCaptchaMs         int
 	SettingsToComponentMs int
-	ComponentToCheckMs int
-	CheckToEndMs int
-	EndSessionMs int
-	ExtraPauseMs int
+	ComponentToCheckMs    int
+	CheckToEndMs          int
+	EndSessionMs          int
+	ExtraPauseMs          int
 }
 
 func GenerateCaptchaTiming(rng *rand.Rand) CaptchaSessionTiming {
 	fetchPow := 600 + rng.Intn(800)
-	
+
 	readCaptcha := 700 + rng.Intn(1200)
-	
+
 	settingsToComponent := 800 + rng.Intn(1200)
-	
+
 	componentToCheck := 1500 + rng.Intn(2000)
-	
+
 	checkToEnd := 400 + rng.Intn(800)
-	
+
 	endSession := 100 + rng.Intn(200)
-	
+
 	var extraPause int
 	if rng.Float32() < 0.10 {
 		extraPause = 800 + rng.Intn(1500)
 	}
-	
+
 	total := fetchPow + readCaptcha + settingsToComponent + componentToCheck + checkToEnd + endSession + extraPause
-	
+
 	if total < 5000 {
 		deficit := 5000 - total + rng.Intn(1000)
 		componentToCheck += deficit * 40 / 100
@@ -339,28 +339,36 @@ func GenerateCaptchaTiming(rng *rand.Rand) CaptchaSessionTiming {
 		readCaptcha += deficit * 20 / 100
 		checkToEnd += deficit * 15 / 100
 	}
-	
+
 	if total > 10000 {
 		excess := total - 10000
 		componentToCheck -= excess * 40 / 100
 		settingsToComponent -= excess * 25 / 100
 		readCaptcha -= excess * 20 / 100
 		checkToEnd -= excess * 15 / 100
-		
-		if componentToCheck < 1200 { componentToCheck = 1200 }
-		if settingsToComponent < 600 { settingsToComponent = 600 }
-		if readCaptcha < 500 { readCaptcha = 500 }
-		if checkToEnd < 300 { checkToEnd = 300 }
+
+		if componentToCheck < 1200 {
+			componentToCheck = 1200
+		}
+		if settingsToComponent < 600 {
+			settingsToComponent = 600
+		}
+		if readCaptcha < 500 {
+			readCaptcha = 500
+		}
+		if checkToEnd < 300 {
+			checkToEnd = 300
+		}
 	}
-	
+
 	return CaptchaSessionTiming{
-		FetchPowMs:          fetchPow,
-		ReadCaptchaMs:       readCaptcha,
+		FetchPowMs:            fetchPow,
+		ReadCaptchaMs:         readCaptcha,
 		SettingsToComponentMs: settingsToComponent,
-		ComponentToCheckMs:  componentToCheck,
-		CheckToEndMs:        checkToEnd,
-		EndSessionMs:        endSession,
-		ExtraPauseMs:        extraPause,
+		ComponentToCheckMs:    componentToCheck,
+		CheckToEndMs:          checkToEnd,
+		EndSessionMs:          endSession,
+		ExtraPauseMs:          extraPause,
 	}
 }
 

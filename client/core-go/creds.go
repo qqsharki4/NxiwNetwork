@@ -463,20 +463,18 @@ func solvePoW(powInput string, difficulty int) string {
 }
 
 func callCaptchaNotRobot(ctx context.Context, sessionToken, hash string, profile BotProfile, captchaRng *rand.Rand) (string, error) {
-	captchaUA := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
-	captchaBrowserFP := fmt.Sprintf("%016x%016x", rand.Uint64(), rand.Uint64())
-	captchaDeviceJSON := `{"screenWidth":1920,"screenHeight":1080,"screenAvailWidth":1920,"screenAvailHeight":1032,"innerWidth":1920,"innerHeight":945,"devicePixelRatio":1,"language":"en-US","languages":["en-US"],"webdriver":false,"hardwareConcurrency":16,"deviceMemory":8,"connectionEffectiveType":"4g","notificationsPermission":"denied"}`
+	captchaUA := normalizeCaptchaUserAgent(profile.UserAgent)
+	captchaHeaders, _ := defaultBotBrowserProfile(captchaUA)
+	captchaBrowserFP := firstNonEmpty(profile.BrowserFP, fmt.Sprintf("%016x%016x", rand.Uint64(), rand.Uint64()))
+	captchaDeviceJSON := firstNonEmpty(profile.DeviceJSON, GetCaptchaDeviceJSON(false, captchaRng))
 
-	captchaCursor := GenerateCaptchaCursor(captchaRng)
-
-	captchaDownlink := GenerateCaptchaDownlink(captchaRng)
-
+	captchaCursor := firstNonEmpty(profile.CursorJSON, GenerateCaptchaCursor(captchaRng))
+	captchaDownlink := firstNonEmpty(profile.Downlink, GenerateCaptchaDownlink(captchaRng))
 	captchaRTT := GenerateCaptchaConnectionRtt(captchaRng)
-
-	captchaAccel := "[]"
-	captchaGyro := "[]"
-	captchaMotion := "[]"
-	captchaTaps := "[]"
+	captchaAccel := firstNonEmpty(profile.Accelerometer, "[]")
+	captchaGyro := firstNonEmpty(profile.Gyroscope, "[]")
+	captchaMotion := firstNonEmpty(profile.Motion, "[]")
+	captchaTaps := firstNonEmpty(profile.Taps, "[]")
 
 	vkReq := func(method string, postData string) (map[string]interface{}, error) {
 		reqURL := "https://api.vk.ru/method/" + method + "?v=5.131"
@@ -488,9 +486,9 @@ func callCaptchaNotRobot(ctx context.Context, sessionToken, hash string, profile
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		req.Header.Set("Origin", "https://id.vk.ru")
 		req.Header.Set("Referer", "https://id.vk.ru/")
-		req.Header.Set("sec-ch-ua-platform", `"Windows"`)
-		req.Header.Set("sec-ch-ua", `"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"`)
-		req.Header.Set("sec-ch-ua-mobile", "?0")
+		req.Header.Set("sec-ch-ua-platform", firstNonEmpty(captchaHeaders.SecChUaPlatform, `"Windows"`))
+		req.Header.Set("sec-ch-ua", firstNonEmpty(captchaHeaders.SecChUa, `"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"`))
+		req.Header.Set("sec-ch-ua-mobile", firstNonEmpty(captchaHeaders.SecChUaMobile, "?0"))
 		req.Header.Set("Sec-Fetch-Site", "same-site")
 		req.Header.Set("Sec-Fetch-Mode", "cors")
 		req.Header.Set("Sec-Fetch-Dest", "empty")
@@ -669,9 +667,9 @@ func getVKCredsOnce(ctx context.Context, hash string, profile BotProfile) (*Cred
 		}
 		req.Header.Set("User-Agent", profile.UserAgent)
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		req.Header.Set("sec-ch-ua-platform", `"Android"`)
-		req.Header.Set("sec-ch-ua", `"Not(A:Brand";v="99", "Android WebView";v="133", "Chromium";v="133"`)
-		req.Header.Set("sec-ch-ua-mobile", "?1")
+		req.Header.Set("sec-ch-ua-platform", firstNonEmpty(profile.SecChUaPlatform, `"Android"`))
+		req.Header.Set("sec-ch-ua", firstNonEmpty(profile.SecChUa, `"Not(A:Brand";v="99", "Android WebView";v="133", "Chromium";v="133"`))
+		req.Header.Set("sec-ch-ua-mobile", firstNonEmpty(profile.SecChUaMobile, "?1"))
 		req.Header.Set("Sec-Fetch-Site", "cross-site")
 		req.Header.Set("Sec-Fetch-Mode", "cors")
 		req.Header.Set("Sec-Fetch-Dest", "empty")
