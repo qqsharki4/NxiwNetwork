@@ -22,7 +22,7 @@ import (
 
 const (
 	workerSendBuf      = 128
-	sessionReadTimeout = 60 * time.Second
+	sessionReadTimeout = 30 * time.Minute
 	readBufSize        = 1600
 	socketBufSize      = 625 * 1024
 )

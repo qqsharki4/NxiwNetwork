@@ -38,6 +38,7 @@ import com.nxiwnetwork.client.AppDiagnosticsSnapshot
 import com.nxiwnetwork.client.AndroidPingSchedule
 import com.nxiwnetwork.client.BatteryDiagnostics
 import com.nxiwnetwork.client.CoreBackend
+import com.nxiwnetwork.client.CoreTrafficMetrics
 import com.nxiwnetwork.client.ProcessDiagnostics
 import com.nxiwnetwork.client.SettingsStore
 import com.nxiwnetwork.client.StorageDiagnostics
@@ -91,6 +92,7 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
     val activeWireGuardMtu by TunnelManager.activeWireGuardMtu.collectAsStateWithLifecycle()
     val activeWireGuardDns by TunnelManager.activeWireGuardDns.collectAsStateWithLifecycle()
     val activeWorkers by TunnelManager.activeWorkers.collectAsStateWithLifecycle()
+    val coreTrafficMetrics by TunnelManager.coreTrafficMetrics.collectAsStateWithLifecycle()
     val stats by TunnelManager.stats.collectAsStateWithLifecycle()
     val pingMs by TunnelManager.currentPingMs.collectAsStateWithLifecycle()
     val androidPingSchedule by TunnelManager.androidPingSchedule.collectAsStateWithLifecycle()
@@ -154,6 +156,7 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
         activeBackend,
         coreProtocolMode,
         activeWorkers,
+        coreTrafficMetrics,
         stats,
         pingMs,
         speedBytes,
@@ -193,6 +196,7 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
             dnsLabel = dnsLabel,
             tunnelRunning = tunnelRunning,
             activeWorkers = activeWorkers,
+            coreTrafficMetrics = coreTrafficMetrics,
             pingMs = pingMs,
             speedBytes = speedBytes,
             stats = stats,
@@ -268,6 +272,7 @@ internal fun DebugMenuDialog(appVersionName: String, onDismiss: () -> Unit) {
                     DebugInfoRow("Ping", if (pingMs > 0) "$pingMs ms" else "нет данных")
                     DebugInfoRow("Скорость", formatDebugSpeed(speedBytes))
                     DebugInfoRow("Статистика", stats)
+                    DebugInfoRow("Дропы ядра", formatDropMetrics(coreTrafficMetrics))
                     DebugInfoRow("Логи", "${logs.size} записей, ошибок непрочитано: $unreadErrors")
 
                     DebugSectionTitle("Метрики приложения")
@@ -1081,6 +1086,7 @@ private fun buildDebugSnapshot(
     dnsLabel: String,
     tunnelRunning: Boolean,
     activeWorkers: Int,
+    coreTrafficMetrics: CoreTrafficMetrics,
     pingMs: Int,
     speedBytes: Long,
     stats: String,
@@ -1121,6 +1127,7 @@ private fun buildDebugSnapshot(
     appendLine("Ping: ${if (pingMs > 0) "$pingMs ms" else "n/a"}")
     appendLine("Speed: ${formatDebugSpeed(speedBytes)}")
     appendLine("Stats: $stats")
+    appendLine("Core drops: ${formatDropMetrics(coreTrafficMetrics)}")
     appendLine("Logs: count=$logCount unread_errors=$unreadErrors")
     appendLine("Routing: enabled=$routingEnabled mode=${if (isWhitelist) "whitelist" else "blacklist"} show_system=$showSystemApps")
     appendLine("WiFi high performance: $wifiHighPerformance")
@@ -1150,6 +1157,11 @@ private fun formatDebugSpeed(bytesPerSecond: Long): String {
     if (bytesPerSecond <= 0L) return "0 KB/s"
     val kb = bytesPerSecond / 1024f
     return if (kb >= 1024f) String.format("%.1f MB/s", kb / 1024f) else String.format("%.0f KB/s", kb)
+}
+
+private fun formatDropMetrics(metrics: CoreTrafficMetrics): String {
+    if (metrics.droppedPackets <= 0L) return "0"
+    return "${metrics.droppedPackets} | no_workers=${metrics.droppedNoWorkers}, queue=${metrics.droppedWorkerQueue}, no_client=${metrics.droppedNoClient}, local_write=${metrics.droppedLocalWrite}"
 }
 
 private fun formatDiagnosticsUptime(snapshot: AppDiagnosticsSnapshot): String {

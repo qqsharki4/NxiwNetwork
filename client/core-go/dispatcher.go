@@ -115,6 +115,7 @@ func (d *Dispatcher) readLoop() {
 		d.mu.Lock()
 		nw := len(d.workers)
 		if nw == 0 {
+			d.stats.DropNoWorkers()
 			d.mu.Unlock()
 			continue
 		}
@@ -148,7 +149,7 @@ func (d *Dispatcher) readLoop() {
 		if bestIdx == -1 {
 			d.rrIndex = (startIdx + 1) % nw
 			d.rrCount = 0
-			atomic.AddInt64(&d.stats.DroppedPackets, 1)
+			d.stats.DropWorkerQueue()
 			d.mu.Unlock()
 			continue
 		}
@@ -169,7 +170,7 @@ func (d *Dispatcher) readLoop() {
 		default:
 			d.rrIndex = (bestIdx + 1) % nw
 			d.rrCount = 0
-			atomic.AddInt64(&d.stats.DroppedPackets, 1)
+			d.stats.DropWorkerQueue()
 			releasePacket(pkt)
 		}
 		d.mu.Unlock()
@@ -217,13 +218,13 @@ func (d *Dispatcher) writeLoop() {
 		case pkt := <-d.ReturnCh:
 			addrPtr := d.clientAddr.Load()
 			if addrPtr == nil {
-				atomic.AddInt64(&d.stats.DroppedPackets, 1)
+				d.stats.DropNoClient()
 				releasePacket(pkt)
 				continue
 			}
 			addr := *addrPtr
 			if _, err := d.localConn.WriteTo(pkt, addr); err != nil {
-				atomic.AddInt64(&d.stats.DroppedPackets, 1)
+				d.stats.DropLocalWrite()
 				releasePacket(pkt)
 				if d.ctx.Err() != nil {
 					return

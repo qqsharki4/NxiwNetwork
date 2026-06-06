@@ -48,7 +48,11 @@ data class CoreTrafficMetrics(
     val packetsDown: Long = 0L,
     val upPacketsPerSecond: Long = 0L,
     val downPacketsPerSecond: Long = 0L,
-    val droppedPackets: Long = 0L
+    val droppedPackets: Long = 0L,
+    val droppedNoWorkers: Long = 0L,
+    val droppedWorkerQueue: Long = 0L,
+    val droppedNoClient: Long = 0L,
+    val droppedLocalWrite: Long = 0L
 ) {
     val totalBytes: Long get() = totalUpBytes + totalDownBytes
     val speedBytesPerSecond: Long get() = upBytesPerSecond + downBytesPerSecond
@@ -354,7 +358,11 @@ object TunnelManager {
             packetsDown = values["packets_down"] ?: 0L,
             upPacketsPerSecond = values["up_pps"] ?: 0L,
             downPacketsPerSecond = values["down_pps"] ?: 0L,
-            droppedPackets = values["drops"] ?: 0L
+            droppedPackets = values["drops"] ?: 0L,
+            droppedNoWorkers = values["drop_no_workers"] ?: 0L,
+            droppedWorkerQueue = values["drop_worker_queue"] ?: 0L,
+            droppedNoClient = values["drop_no_client"] ?: 0L,
+            droppedLocalWrite = values["drop_local_write"] ?: 0L
         )
     }
 

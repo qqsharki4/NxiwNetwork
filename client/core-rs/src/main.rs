@@ -496,7 +496,7 @@ async fn stats_loop(stats: Arc<Stats>, mut shutdown_rx: watch::Receiver<bool>) {
                 let down_mb = down as f64 / (1024.0 * 1024.0);
                 ticks += 1;
                 if ticks % 3 == 0 {
-                    println!("[СТАТИСТИКА] Активных: {active} | Всего: {total_mb:.2} МБ | ↑ {up_mb:.2} МБ / {packets_up} пак | ↓ {down_mb:.2} МБ / {packets_down} пак | Дропы: {dropped}");
+                    println!("[СТАТИСТИКА] Активных: {active} | Всего: {total_mb:.2} МБ | ↑ {up_mb:.2} МБ / {packets_up} пак | ↓ {down_mb:.2} МБ / {packets_down} пак");
                 }
 
                 last_time = now;

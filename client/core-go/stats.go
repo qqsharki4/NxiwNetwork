@@ -7,18 +7,42 @@ import (
 )
 
 type Stats struct {
-	ActiveConnections int32
-	Reconnects        int64
-	TotalBytesUp      int64
-	TotalBytesDown    int64
-	PacketsUp         int64
-	PacketsDown       int64
-	DroppedPackets    int64
-	CredsErrors       int64
+	ActiveConnections  int32
+	Reconnects         int64
+	TotalBytesUp       int64
+	TotalBytesDown     int64
+	PacketsUp          int64
+	PacketsDown        int64
+	DroppedPackets     int64
+	DroppedNoWorkers   int64
+	DroppedWorkerQueue int64
+	DroppedNoClient    int64
+	DroppedLocalWrite  int64
+	CredsErrors        int64
 }
 
 func NewStats() *Stats {
 	return &Stats{}
+}
+
+func (s *Stats) DropNoWorkers() {
+	atomic.AddInt64(&s.DroppedPackets, 1)
+	atomic.AddInt64(&s.DroppedNoWorkers, 1)
+}
+
+func (s *Stats) DropWorkerQueue() {
+	atomic.AddInt64(&s.DroppedPackets, 1)
+	atomic.AddInt64(&s.DroppedWorkerQueue, 1)
+}
+
+func (s *Stats) DropNoClient() {
+	atomic.AddInt64(&s.DroppedPackets, 1)
+	atomic.AddInt64(&s.DroppedNoClient, 1)
+}
+
+func (s *Stats) DropLocalWrite() {
+	atomic.AddInt64(&s.DroppedPackets, 1)
+	atomic.AddInt64(&s.DroppedLocalWrite, 1)
 }
 
 func (s *Stats) RunLoop(shutdown <-chan struct{}) {
@@ -49,6 +73,10 @@ func (s *Stats) RunLoop(shutdown <-chan struct{}) {
 			packetsUp := atomic.LoadInt64(&s.PacketsUp)
 			packetsDown := atomic.LoadInt64(&s.PacketsDown)
 			dropped := atomic.LoadInt64(&s.DroppedPackets)
+			dropNoWorkers := atomic.LoadInt64(&s.DroppedNoWorkers)
+			dropWorkerQueue := atomic.LoadInt64(&s.DroppedWorkerQueue)
+			dropNoClient := atomic.LoadInt64(&s.DroppedNoClient)
+			dropLocalWrite := atomic.LoadInt64(&s.DroppedLocalWrite)
 			upBps := int64(float64(up-lastUp) / elapsedSeconds)
 			downBps := int64(float64(down-lastDown) / elapsedSeconds)
 			upPps := int64(float64(packetsUp-lastPacketsUp) / elapsedSeconds)
@@ -67,7 +95,7 @@ func (s *Stats) RunLoop(shutdown <-chan struct{}) {
 			}
 
 			log.Printf(
-				"[CORE_METRICS] active=%d total_up=%d total_down=%d up_bps=%d down_bps=%d packets_up=%d packets_down=%d up_pps=%d down_pps=%d drops=%d",
+				"[CORE_METRICS] active=%d total_up=%d total_down=%d up_bps=%d down_bps=%d packets_up=%d packets_down=%d up_pps=%d down_pps=%d drops=%d drop_no_workers=%d drop_worker_queue=%d drop_no_client=%d drop_local_write=%d",
 				active,
 				up,
 				down,
@@ -78,6 +106,10 @@ func (s *Stats) RunLoop(shutdown <-chan struct{}) {
 				upPps,
 				downPps,
 				dropped,
+				dropNoWorkers,
+				dropWorkerQueue,
+				dropNoClient,
+				dropLocalWrite,
 			)
 
 			totalMB := float64(up+down) / (1024.0 * 1024.0)
@@ -87,14 +119,13 @@ func (s *Stats) RunLoop(shutdown <-chan struct{}) {
 			ticks++
 			if ticks%3 == 0 {
 				log.Printf(
-					"[СТАТИСТИКА] Активных: %d | Всего: %.2f МБ | ↑ %.2f МБ / %d пак | ↓ %.2f МБ / %d пак | Дропы: %d",
+					"[СТАТИСТИКА] Активных: %d | Всего: %.2f МБ | ↑ %.2f МБ / %d пак | ↓ %.2f МБ / %d пак",
 					active,
 					totalMB,
 					upMB,
 					packetsUp,
 					downMB,
 					packetsDown,
-					dropped,
 				)
 			}
 
