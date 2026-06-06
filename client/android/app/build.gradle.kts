@@ -26,7 +26,7 @@ android {
 
     defaultConfig {
         applicationId = "com.nxiwnetwork.client"
-        minSdk = 29
+        minSdk = 28
         targetSdk = 34
         versionCode = appVersionCode
         versionName = appVersionName
