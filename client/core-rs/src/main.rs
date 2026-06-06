@@ -69,6 +69,7 @@ struct CoreArgs {
     password: String,
     wrap_transport: bool,
     user_agent: String,
+    fingerprint: String,
     captcha_mode: String,
     keepalive: Duration,
     turn_host: Option<String>,
@@ -228,6 +229,7 @@ async fn run() -> Result<()> {
     );
     println!("[КЛИЕНТ] Device ID: {}", args.device_id);
     println!("[КЛИЕНТ] Обход капчи: {}", args.captcha_mode);
+    println!("[КЛИЕНТ] Fingerprint: {}", args.fingerprint);
     println!("[КЛИЕНТ] Keepalive: {} сек", args.keepalive.as_secs());
     println!(
         "[КЛИЕНТ] WRAP/OBFS: {}",
@@ -302,6 +304,7 @@ fn parse_core_args(args: &[String]) -> Result<CoreArgs> {
     let mut password = String::new();
     let mut wrap_transport = false;
     let mut user_agent = "Mozilla/5.0".to_string();
+    let mut fingerprint = "auto".to_string();
     let mut captcha_mode = "rjs".to_string();
     let mut keepalive_seconds = 10u64;
     let mut turn_host = None;
@@ -323,6 +326,7 @@ fn parse_core_args(args: &[String]) -> Result<CoreArgs> {
             "-device-id" => device_id = next_value(args, &mut index),
             "-password" => password = next_value(args, &mut index),
             "-user-agent" => user_agent = next_value(args, &mut index),
+            "-fingerprint" => fingerprint = normalize_fingerprint(&next_value(args, &mut index)),
             "-captcha-mode" => captcha_mode = next_value(args, &mut index),
             "-keepalive-sec" => {
                 keepalive_seconds = next_value(args, &mut index)
@@ -375,6 +379,7 @@ fn parse_core_args(args: &[String]) -> Result<CoreArgs> {
         password,
         wrap_transport,
         user_agent,
+        fingerprint,
         captcha_mode,
         keepalive: Duration::from_secs(keepalive_seconds),
         turn_host: turn_host.filter(|v| !v.trim().is_empty()),
@@ -382,6 +387,15 @@ fn parse_core_args(args: &[String]) -> Result<CoreArgs> {
         vk_app_id,
         vk_app_secret,
     })
+}
+
+fn normalize_fingerprint(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "chrome" | "safari" | "firefox" | "edge" | "android" | "ios" | "linux" | "macos" => {
+            value.trim().to_ascii_lowercase()
+        }
+        _ => "auto".to_string(),
+    }
 }
 
 fn next_value(args: &[String], index: &mut usize) -> String {
@@ -1647,6 +1661,7 @@ async fn run_session(
     let mut last_payload_write = Instant::now();
     let mut has_sent_payload = false;
     let mut session_error = None;
+    let mut soft_read_errors = 0usize;
 
     loop {
         tokio::select! {
@@ -1689,6 +1704,11 @@ async fn run_session(
                 let n = match read {
                     Ok(Ok(n)) => n,
                     Ok(Err(err)) => {
+                        if is_soft_dtls_read_error(&err.to_string()) && soft_read_errors < 3 {
+                            soft_read_errors += 1;
+                            time::sleep(Duration::from_millis(150 * soft_read_errors as u64)).await;
+                            continue;
+                        }
                         session_error = Some(anyhow::anyhow!("Ошибка Reader: {err}"));
                         break;
                     }
@@ -1697,6 +1717,7 @@ async fn run_session(
                 if &buf[..n] == WAKEUP_PACKET {
                     continue;
                 }
+                soft_read_errors = 0;
                 if dispatcher.return_tx.send(Bytes::copy_from_slice(&buf[..n])).await.is_err() {
                     break;
                 }
@@ -1713,6 +1734,15 @@ async fn run_session(
         Some(err) => Err(err),
         None => Ok(()),
     }
+}
+
+fn is_soft_dtls_read_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("read interrupted by close")
+        || lower.contains("close notify")
+        || lower.contains("alert is fatal")
+        || lower.contains("use of closed network connection")
+        || lower.contains("eof")
 }
 
 struct ActiveGuard {
@@ -2342,7 +2372,8 @@ async fn get_vk_creds_with_retries(
         .map(|duration| duration.as_nanos() as u64)
         .unwrap_or(0)
         ^ hash.len() as u64;
-    let profile = botgen::generate_bot_profile(&args.user_agent, hash, action_seed);
+    let profile =
+        botgen::generate_bot_profile(&args.user_agent, &args.fingerprint, hash, action_seed);
 
     for attempt in 0..MAX_CREDS_RETRIES {
         match get_vk_creds_once(args, hash, captcha_tx.clone(), &profile).await {

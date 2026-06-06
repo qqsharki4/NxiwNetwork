@@ -66,6 +66,18 @@ type connectedUDPConn struct{ *net.UDPConn }
 
 func (c *connectedUDPConn) WriteTo(p []byte, _ net.Addr) (int, error) { return c.Write(p) }
 
+func isSoftDTLSReadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "read interrupted by close") ||
+		strings.Contains(errStr, "close notify") ||
+		strings.Contains(errStr, "alert is fatal") ||
+		strings.Contains(errStr, "use of closed network connection") ||
+		strings.Contains(errStr, "eof")
+}
+
 func RunSession(
 	ctx context.Context,
 	tp *TurnParams,
@@ -430,6 +442,7 @@ func RunSession(
 		defer sessCancel()
 		b := make([]byte, 2000)
 		var lastReadDeadline time.Time
+		softReadErrors := 0
 		for {
 			now := time.Now()
 			if now.Sub(lastReadDeadline) > 10*time.Second {
@@ -445,9 +458,15 @@ func RunSession(
 				if ne, ok := readErr.(net.Error); ok && ne.Timeout() {
 					continue
 				}
+				if isSoftDTLSReadError(readErr) && softReadErrors < 3 {
+					softReadErrors++
+					time.Sleep(time.Duration(150*softReadErrors) * time.Millisecond)
+					continue
+				}
 				log.Printf("[ВОРКЕР #%d] Ошибка Reader: %v", sessionID, readErr)
 				return
 			}
+			softReadErrors = 0
 
 			if n == len(wakeupPacket) && bytes.Equal(b[:n], wakeupPacket) {
 				continue

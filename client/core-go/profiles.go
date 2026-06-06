@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"os"
 	"strings"
+	"sync/atomic"
 )
 
 type Profile struct {
@@ -55,19 +56,40 @@ var iosProfiles = []Profile{
 	{UserAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_6_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1", SecChUa: `"Safari";v="17", "Not-A.Brand";v="24", "Apple Safari";v="17"`, SecChUaMobile: "?1", SecChUaPlatform: `"iOS"`},
 }
 
-var activeFingerprint = "chrome"
+var activeFingerprint atomic.Value
 
-func SetActiveFingerprint(fp string) { activeFingerprint = fp }
-func GetActiveFingerprint() string   { return activeFingerprint }
+func init() {
+	activeFingerprint.Store("auto")
+}
 
-func getRandomProfile() Profile {
-	switch activeFingerprint {
+func normalizeFingerprint(fp string) string {
+	switch strings.ToLower(strings.TrimSpace(fp)) {
+	case "chrome", "safari", "firefox", "edge", "android", "ios", "linux", "macos":
+		return strings.ToLower(strings.TrimSpace(fp))
+	default:
+		return "auto"
+	}
+}
+
+func SetActiveFingerprint(fp string) {
+	activeFingerprint.Store(normalizeFingerprint(fp))
+}
+
+func GetActiveFingerprint() string {
+	if fp, ok := activeFingerprint.Load().(string); ok && fp != "" {
+		return fp
+	}
+	return "auto"
+}
+
+func getRandomProfileForFingerprint(fp string) Profile {
+	switch normalizeFingerprint(fp) {
 	case "android":
 		return androidProfiles[rand.Intn(len(androidProfiles))]
 	case "ios":
 		return iosProfiles[rand.Intn(len(iosProfiles))]
 	case "safari":
-		return profileList[5]
+		return iosProfiles[rand.Intn(len(iosProfiles))]
 	case "firefox":
 		return profileList[len(profileList)-1]
 	case "edge":
@@ -79,6 +101,10 @@ func getRandomProfile() Profile {
 	default:
 		return profileList[rand.Intn(3)]
 	}
+}
+
+func getRandomProfile() Profile {
+	return getRandomProfileForFingerprint(GetActiveFingerprint())
 }
 
 func inferFingerprintFromUserAgent(userAgent string) string {
@@ -107,12 +133,34 @@ func defaultBotBrowserProfile(realUserAgent string) (Profile, *SavedProfile) {
 	if saved, err := LoadProfileFromDisk(); err == nil && strings.TrimSpace(saved.UserAgent) != "" {
 		return saved.Profile, saved
 	}
-	SetActiveFingerprint(inferFingerprintFromUserAgent(realUserAgent))
-	selected := getRandomProfile()
-	if ua := strings.TrimSpace(realUserAgent); ua != "" {
-		selected.UserAgent = ua
+	mode := GetActiveFingerprint()
+	fingerprint := mode
+	if mode == "auto" {
+		fingerprint = inferFingerprintFromUserAgent(realUserAgent)
+	}
+	selected := getRandomProfileForFingerprint(fingerprint)
+	if mode == "auto" {
+		if ua := strings.TrimSpace(realUserAgent); ua != "" {
+			selected.UserAgent = ua
+		}
 	}
 	return selected, nil
+}
+
+func activeFingerprintForLog(realUserAgent string) string {
+	mode := GetActiveFingerprint()
+	if mode != "auto" {
+		return mode
+	}
+	return inferFingerprintFromUserAgent(realUserAgent)
+}
+
+func forcedFingerprintUserAgent(realUserAgent string) string {
+	if GetActiveFingerprint() == "auto" {
+		return strings.TrimSpace(realUserAgent)
+	}
+	selected := getRandomProfile()
+	return selected.UserAgent
 }
 
 func firstNonEmpty(values ...string) string {

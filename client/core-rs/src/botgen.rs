@@ -46,6 +46,7 @@ const PROFILE_FILE: &str = "vk_profile.json";
 
 pub fn generate_bot_profile(
     real_user_agent: &str,
+    fingerprint: &str,
     base_device_id: &str,
     action_seed: u64,
 ) -> BotProfile {
@@ -58,7 +59,7 @@ pub fn generate_bot_profile(
     let mut hw_rng = BotRng::new(hw_seed);
     let mut action_rng = BotRng::new(action_seed);
 
-    let (browser_profile, saved_profile) = default_browser_profile(real_user_agent);
+    let (browser_profile, saved_profile) = default_browser_profile(real_user_agent, fingerprint);
 
     let widths = [720i32, 1080, 1440];
     let width = widths[hw_rng.gen_range_usize(0, widths.len())];
@@ -132,29 +133,47 @@ pub fn generate_bot_profile(
 
 pub fn captcha_browser_profile(profile: &BotProfile) -> BrowserProfile {
     let ua = normalize_captcha_user_agent(&profile.user_agent);
-    default_browser_profile(&ua).0
+    default_browser_profile(&ua, "auto").0
 }
 
-fn default_browser_profile(real_user_agent: &str) -> (BrowserProfile, Option<SavedProfile>) {
+fn default_browser_profile(
+    real_user_agent: &str,
+    fingerprint: &str,
+) -> (BrowserProfile, Option<SavedProfile>) {
     if let Some(saved) = load_profile_from_disk() {
         if !saved.profile.user_agent.trim().is_empty() {
             return (saved.profile.clone(), Some(saved));
         }
     }
-    let inferred = infer_fingerprint_from_user_agent(real_user_agent);
-    let mut selected = match inferred.as_str() {
+    let mode = normalize_fingerprint(fingerprint);
+    let selected_fingerprint = if mode == "auto" {
+        infer_fingerprint_from_user_agent(real_user_agent)
+    } else {
+        mode.clone()
+    };
+    let mut selected = match selected_fingerprint.as_str() {
         "android" => android_profile(),
         "ios" => ios_profile(),
         "firefox" => firefox_profile(),
         "edge" => edge_profile(),
+        "safari" => ios_profile(),
         "macos" => macos_profile(),
         "linux" => linux_profile(),
         _ => windows_chrome_profile(),
     };
-    if !real_user_agent.trim().is_empty() {
+    if mode == "auto" && !real_user_agent.trim().is_empty() {
         selected.user_agent = real_user_agent.trim().to_string();
     }
     (selected, None)
+}
+
+fn normalize_fingerprint(fingerprint: &str) -> String {
+    match fingerprint.trim().to_ascii_lowercase().as_str() {
+        "chrome" | "safari" | "firefox" | "edge" | "android" | "ios" | "linux" | "macos" => {
+            fingerprint.trim().to_ascii_lowercase()
+        }
+        _ => "auto".to_string(),
+    }
 }
 
 fn load_profile_from_disk() -> Option<SavedProfile> {

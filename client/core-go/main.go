@@ -154,6 +154,7 @@ func main() {
 	userAgent := flag.String("user-agent", "", "User-Agent строка устройства")
 	connPassword := flag.String("password", "", "пароль подключения")
 	captchaModeFlag := flag.String("captcha-mode", "rjs", "режим капчи: wv, rjs или rjs_slider")
+	trafficFingerprint := flag.String("fingerprint", "auto", "fingerprint трафика: auto, chrome, safari, firefox")
 	keepaliveSeconds := flag.Int("keepalive-sec", 10, "интервал keepalive клиента в секундах (5-60)")
 
 	flag.Parse()
@@ -164,6 +165,7 @@ func main() {
 	SetCaptchaModeEnv(*captchaModeFlag)
 	noDnsFlag.Store(*noDns)
 	SetUserAgent(*userAgent)
+	SetActiveFingerprint(*trafficFingerprint)
 
 	if *peerAddr == "" || *vkHash == "" {
 		log.Fatal("[КЛИЕНТ] Нужны -peer и -vk")
@@ -248,6 +250,7 @@ func main() {
 	log.Printf("[КЛИЕНТ] Протокол: %s", proto)
 	log.Printf("[КЛИЕНТ] Device ID: %s", *deviceID)
 	log.Printf("[КЛИЕНТ] Обход капчи: %s", captchaMode.Load().(string))
+	log.Printf("[КЛИЕНТ] Fingerprint: %s", activeFingerprintForLog(*userAgent))
 	log.Printf("[КЛИЕНТ] Keepalive: %d сек", *keepaliveSeconds)
 	if *wrapMode {
 		log.Printf("[КЛИЕНТ] WRAP/OBFS: ON")

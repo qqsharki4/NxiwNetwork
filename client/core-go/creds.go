@@ -366,6 +366,35 @@ func selectCaptchaTLSProfile(userAgent string) profiles.ClientProfile {
 	return profiles.Chrome_120
 }
 
+func selectTrafficTLSProfile(userAgent string) profiles.ClientProfile {
+	switch GetActiveFingerprint() {
+	case "safari":
+		return profiles.Safari_16_0
+	case "ios":
+		return profiles.Safari_IOS_18_0
+	case "firefox":
+		return profiles.Firefox_132
+	case "android":
+		return profiles.Okhttp4Android13
+	case "chrome", "edge", "linux", "macos":
+		return profiles.Chrome_146
+	}
+
+	lowerUA := strings.ToLower(userAgent)
+	switch {
+	case strings.Contains(lowerUA, "android") || strings.Contains(lowerUA, "mobile"):
+		return profiles.Okhttp4Android13
+	case strings.Contains(lowerUA, "iphone") || strings.Contains(lowerUA, "ipad"):
+		return profiles.Safari_IOS_18_0
+	case strings.Contains(lowerUA, "firefox"):
+		return profiles.Firefox_132
+	case strings.Contains(lowerUA, "safari") && !strings.Contains(lowerUA, "chrome") && !strings.Contains(lowerUA, "chromium"):
+		return profiles.Safari_16_0
+	default:
+		return profiles.Chrome_146
+	}
+}
+
 func captchaSettingsPreferSlider(settings *captchaSettingsResponse) bool {
 	if settings == nil {
 		return false
@@ -593,8 +622,9 @@ func getUniqueVKCreds(ctx context.Context, hash string, maxRetries int, stats *S
 	var lastErr error
 
 	realUA := getUserAgent()
+	profileUA := forcedFingerprintUserAgent(realUA)
 	actionSeed := uint64(time.Now().UnixNano()) ^ uint64(len(hash))
-	profile := GenerateBotProfile(realUA, hash, actionSeed)
+	profile := GenerateBotProfile(profileUA, hash, actionSeed)
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		select {
@@ -651,9 +681,13 @@ func min(a, b int) int {
 }
 
 func getVKCredsOnce(ctx context.Context, hash string, profile BotProfile) (*Credentials, error) {
-	client := &http.Client{
-		Timeout:   15 * time.Second,
-		Transport: getSharedTransport(),
+	client, err := tlsclient.NewHttpClient(
+		tlsclient.NewNoopLogger(),
+		tlsclient.WithTimeoutSeconds(20),
+		tlsclient.WithClientProfile(selectTrafficTLSProfile(profile.UserAgent)),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("tls-client init: %w", err)
 	}
 
 	okAppKey := "CGMMEJLGDIHBABABA"
@@ -661,7 +695,7 @@ func getVKCredsOnce(ctx context.Context, hash string, profile BotProfile) (*Cred
 	appSecret := vkAppSecret.Load().(string)
 
 	doReq := func(data, url string) (map[string]interface{}, error) {
-		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBufferString(data))
+		req, err := fhttp.NewRequestWithContext(ctx, "POST", url, bytes.NewBufferString(data))
 		if err != nil {
 			return nil, fmt.Errorf("создание запроса: %w", err)
 		}
