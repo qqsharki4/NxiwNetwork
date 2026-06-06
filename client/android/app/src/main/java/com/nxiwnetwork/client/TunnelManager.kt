@@ -60,6 +60,13 @@ data class AndroidPingSchedule(
     val backgroundIntervalMs: Int = SettingsStore.DEFAULT_ANDROID_PING_BACKGROUND_INTERVAL_MS
 )
 
+@Stable
+data class ActiveTunnelNode(
+    val serverId: String = "",
+    val peer: String = "",
+    val connectionPassword: String = ""
+)
+
 object TunnelManager {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -98,6 +105,7 @@ object TunnelManager {
     val activeRequestedDns = MutableStateFlow("")
     val activeWireGuardMtu = MutableStateFlow(0)
     val activeWireGuardDns = MutableStateFlow("")
+    val activeTunnelNode = MutableStateFlow(ActiveTunnelNode())
     
     val cooldownSeconds = MutableStateFlow(0)
     private var cooldownJob: Job? = null
@@ -407,6 +415,7 @@ object TunnelManager {
             currentCaptchaMode = params.captchaMode
             resetCoreMetrics()
             currentPingMs.value = 0
+            activeTunnelNode.value = ActiveTunnelNode()
             tunnelStartedAtElapsedMs.value = SystemClock.elapsedRealtime()
         }
         
@@ -534,6 +543,11 @@ object TunnelManager {
                 process = pb.start()
                 coreProcessPid.value = process?.safePid()
                 running.value = true
+                activeTunnelNode.value = ActiveTunnelNode(
+                    serverId = settingsStore.selectedServerId.first(),
+                    peer = peerEndpoint,
+                    connectionPassword = params.connectionPassword.trim()
+                )
                 activeCoreBackend.value = backendResolution.active
                 coreProtocolMode.value = "ожидание handshake"
                 stats.value = "Ожидание данных..."
@@ -550,6 +564,7 @@ object TunnelManager {
                 running.value = false
                 activeCoreBackend.value = null
                 coreProtocolMode.value = "нет данных"
+                activeTunnelNode.value = ActiveTunnelNode()
                 updateWidgetState()
             }
         }
@@ -956,6 +971,7 @@ object TunnelManager {
             coreProtocolMode.value = "нет данных"
             stats.value = "Остановлено"
             tunnelStartedAtElapsedMs.value = null
+            activeTunnelNode.value = ActiveTunnelNode()
             updateWidgetState()
         }
     }

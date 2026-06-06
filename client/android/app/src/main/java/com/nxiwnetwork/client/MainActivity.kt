@@ -87,6 +87,12 @@ import kotlin.math.absoluteValue
 private const val UPDATE_REMIND_LATER_MS = 24L * 60L * 60L * 1000L
 private const val AUTO_UPDATE_CHECK_INTERVAL_MS = 3L * 60L * 60L * 1000L
 
+private enum class UpdateButtonState {
+    Download,
+    InstallPending,
+    InstallReady
+}
+
 class MainActivity : ComponentActivity() {
 
     private var pendingVpnStartIntent: Intent? = null
@@ -578,24 +584,15 @@ class MainActivity : ComponentActivity() {
 
     private suspend fun saveImportedNode(settingsStore: SettingsStore, config: ImportNodeConfig, select: Boolean) {
         withContext(Dispatchers.IO) {
-            val currentArray = try {
-                JSONArray(settingsStore.savedServersJson.first())
-            } catch (_: Exception) {
-                JSONArray()
-            }
-
             val id = UUID.randomUUID().toString()
-            val nodeJson = JSONObject().apply {
-                put("id", id)
-                put("name", config.name.trim())
-                put("ip", formatNodeAddress(config.host, config.port))
-                put("password", config.password.trim())
-                put("port", config.port)
-                put("protocol", config.protocol)
-            }
-
-            currentArray.put(nodeJson)
-            settingsStore.saveServersList(currentArray.toString())
+            val decoded = StoredServerResolver.decode(settingsStore.savedServersJson.first())
+            val updatedServers = decoded.servers + NxiwNetworkServer(
+                id = id,
+                name = config.name.trim(),
+                ip = formatNodeAddress(config.host, config.port),
+                password = config.password.trim()
+            )
+            settingsStore.saveServersList(StoredServerResolver.encode(updatedServers))
 
             if (select) {
                 settingsStore.save(
@@ -664,6 +661,11 @@ fun UpdateAvailableDialog(
 ) {
     val activeDownload = downloadState?.takeIf { it.tagName == update.tagName }
     val isDownloading = activeDownload?.isActive == true
+    val updateButtonState = when {
+        isDownloaded -> UpdateButtonState.InstallReady
+        isDownloading -> UpdateButtonState.InstallPending
+        else -> UpdateButtonState.Download
+    }
     val shownProgress = activeDownload?.progressPercent ?: if (isDownloaded) 100 else 0
     val animatedProgress by animateFloatAsState(
         targetValue = shownProgress.coerceIn(0, 100) / 100f,
@@ -759,26 +761,37 @@ fun UpdateAvailableDialog(
                 Spacer(Modifier.height(20.dp))
 
                 Button(
-                    onClick = if (isDownloaded && !isDownloading) onInstall else onDownload,
-                    enabled = !isDownloading,
+                    onClick = if (updateButtonState == UpdateButtonState.InstallReady) onInstall else onDownload,
+                    enabled = updateButtonState != UpdateButtonState.InstallPending,
                     modifier = Modifier.fillMaxWidth().height(56.dp),
                     shape = RoundedCornerShape(24.dp)
                 ) {
-                    Icon(
-                        if (isDownloaded) Icons.Default.InstallMobile else Icons.Default.Download,
-                        null,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        when {
-                            isDownloading -> "Скачиваем..."
-                            isDownloaded -> "Установить"
-                            else -> "Скачать"
+                    AnimatedContent(
+                        targetState = updateButtonState,
+                        transitionSpec = {
+                            (fadeIn(tween(180, easing = FastOutSlowInEasing)) +
+                                slideInVertically(tween(220, easing = FastOutSlowInEasing)) { it / 3 })
+                                .togetherWith(
+                                    fadeOut(tween(120, easing = FastOutSlowInEasing)) +
+                                        slideOutVertically(tween(160, easing = FastOutSlowInEasing)) { -it / 3 }
+                                )
                         },
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 16.sp
-                    )
+                        label = "update_button_state"
+                    ) { state ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                if (state == UpdateButtonState.Download) Icons.Default.Download else Icons.Default.InstallMobile,
+                                null,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                if (state == UpdateButtonState.Download) "Скачать" else "Установить",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 16.sp
+                            )
+                        }
+                    }
                 }
                 Spacer(Modifier.height(10.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {

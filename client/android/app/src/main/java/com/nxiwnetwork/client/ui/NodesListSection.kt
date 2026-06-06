@@ -58,9 +58,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.nxiwnetwork.client.NxiwNetworkServer
+import com.nxiwnetwork.client.StoredServerResolver
 import com.nxiwnetwork.client.formatNodeAddress
 import com.nxiwnetwork.client.parseNodeAddress
 import com.nxiwnetwork.client.SettingsStore
+import com.nxiwnetwork.client.TunnelManager
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.util.UUID
@@ -83,6 +86,8 @@ fun NodesListSection(modifier: Modifier = Modifier) {
     val connectionPassword by settingsStore.connectionPassword.collectAsStateWithLifecycle("")
     val selectedServerId by settingsStore.selectedServerId.collectAsStateWithLifecycle("")
     val savedServersJson by settingsStore.savedServersJson.collectAsStateWithLifecycle("[]")
+    val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
+    val activeTunnelNode by TunnelManager.activeTunnelNode.collectAsStateWithLifecycle()
 
     val serverList = remember { mutableStateListOf<NxiwNetworkServer>() }
     var serverToEdit by remember { mutableStateOf<NxiwNetworkServer?>(null) }
@@ -90,7 +95,7 @@ fun NodesListSection(modifier: Modifier = Modifier) {
     var nodeFabExpanded by remember { mutableStateOf(false) }
 
     fun saveServers() {
-        scope.launch { settingsStore.saveServersList(encodeSavedServers(serverList)) }
+        scope.launch { settingsStore.saveServersList(StoredServerResolver.encode(serverList)) }
     }
 
     fun openNewNodeDialog() {
@@ -125,18 +130,22 @@ fun NodesListSection(modifier: Modifier = Modifier) {
     }
 
     LaunchedEffect(savedServersJson) {
-        val decoded = decodeSavedServersJson(savedServersJson)
+        val decoded = StoredServerResolver.decode(savedServersJson)
         serverList.clear()
         serverList.addAll(decoded.servers)
         if (decoded.normalized) {
-            settingsStore.saveServersList(encodeSavedServers(decoded.servers))
+            settingsStore.saveServersList(StoredServerResolver.encode(decoded.servers))
         }
     }
 
     val activeSelectedServerId by remember(peer, connectionPassword, selectedServerId) {
         derivedStateOf {
-            serverList.firstOrNull { it.id == selectedServerId && nodeMatchesActiveConfig(it, peer, connectionPassword) }?.id
-                ?: serverList.firstOrNull { nodeMatchesActiveConfig(it, peer, connectionPassword) }?.id
+            StoredServerResolver.findSelectedServer(
+                servers = serverList,
+                peer = peer,
+                password = connectionPassword,
+                selectedServerId = selectedServerId
+            )?.id
                 ?: ""
         }
     }
@@ -192,6 +201,9 @@ fun NodesListSection(modifier: Modifier = Modifier) {
                                     )
                                     settingsStore.saveConnectionPassword(server.password.trim())
                                     settingsStore.saveSelectedServerId(server.id)
+                                }
+                                if (tunnelRunning && server.id != activeTunnelNode.serverId) {
+                                    Toast.makeText(context, "Изменения применятся после перезапуска туннеля", Toast.LENGTH_SHORT).show()
                                 }
                             },
                             onEdit = {

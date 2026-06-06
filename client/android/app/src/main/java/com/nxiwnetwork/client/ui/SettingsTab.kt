@@ -73,6 +73,8 @@ import androidx.compose.ui.window.PopupProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nxiwnetwork.client.DEFAULT_NODE_PORT
 import com.nxiwnetwork.client.CoreBackend
+import com.nxiwnetwork.client.NxiwNetworkServer
+import com.nxiwnetwork.client.StoredServerResolver
 import com.nxiwnetwork.client.isValidNodeAddress
 import com.nxiwnetwork.client.nodeEndpointHost
 import com.nxiwnetwork.client.nodeEndpointPort
@@ -91,77 +93,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.InetSocketAddress
 import java.net.Socket
-import java.util.UUID
 import kotlin.math.roundToInt
-
-data class NxiwNetworkServer(
-    val id: String = UUID.randomUUID().toString(),
-    val name: String,
-    val ip: String,
-    val password: String
-)
-
-data class SavedServersDecodeResult(
-    val servers: List<NxiwNetworkServer>,
-    val normalized: Boolean
-)
-
-fun encodeSavedServers(servers: List<NxiwNetworkServer>): String {
-    val array = JSONArray()
-    servers.forEach { server ->
-        array.put(
-            JSONObject().apply {
-                put("id", server.id)
-                put("name", server.name)
-                put("ip", server.ip.trim())
-                put("password", server.password.trim())
-            }
-        )
-    }
-    return array.toString()
-}
-
-fun decodeSavedServersJson(rawJson: String): SavedServersDecodeResult {
-    return runCatching {
-        val array = JSONArray(rawJson)
-        val usedIds = mutableSetOf<String>()
-        val servers = mutableListOf<NxiwNetworkServer>()
-        var normalized = false
-
-        for (index in 0 until array.length()) {
-            val obj = array.getJSONObject(index)
-            val rawId = obj.optString("id", "").trim()
-            val id = if (rawId.isBlank() || rawId in usedIds) {
-                normalized = true
-                UUID.randomUUID().toString()
-            } else {
-                rawId
-            }
-            usedIds += id
-            servers += NxiwNetworkServer(
-                id = id,
-                name = obj.optString("name"),
-                ip = obj.optString("ip").trim(),
-                password = obj.optString("password").trim()
-            )
-        }
-
-        SavedServersDecodeResult(servers, normalized)
-    }.getOrElse {
-        SavedServersDecodeResult(emptyList(), false)
-    }
-}
-
-fun nodeMatchesActiveConfig(server: NxiwNetworkServer, peer: String, password: String): Boolean {
-    return peer.trim().isNotBlank() &&
-        normalizeNodeEndpoint(server.ip) == normalizeNodeEndpoint(peer.trim()) &&
-        server.password.trim() == password.trim()
-}
-
-fun nodeMatchesActiveEndpoint(server: NxiwNetworkServer, peer: String): Boolean {
-    return peer.trim().isNotBlank() &&
-        normalizeNodeEndpoint(server.ip) == normalizeNodeEndpoint(peer.trim())
-}
 
 fun captchaModeForMethod(method: String): String = when (method) {
     "rjs_classic" -> "rjs"
@@ -252,6 +184,7 @@ fun SettingsTab() {
     val uploadTrafficGraphPoints by TunnelManager.uploadTrafficGraphPoints.collectAsStateWithLifecycle()
     val downloadTrafficGraphPoints by TunnelManager.downloadTrafficGraphPoints.collectAsStateWithLifecycle()
     val activeWorkers by TunnelManager.activeWorkers.collectAsStateWithLifecycle()
+    val activeTunnelNode by TunnelManager.activeTunnelNode.collectAsStateWithLifecycle()
 
     val peer by settingsStore.peer.collectAsStateWithLifecycle("")
     val hashes by settingsStore.vkHashes.collectAsStateWithLifecycle("")
@@ -300,22 +233,29 @@ fun SettingsTab() {
     }
 
     LaunchedEffect(savedServersJson) {
-        val decoded = decodeSavedServersJson(savedServersJson)
+        val decoded = StoredServerResolver.decode(savedServersJson)
         serverList.clear()
         serverList.addAll(decoded.servers)
         if (decoded.normalized) {
-            settingsStore.saveServersList(encodeSavedServers(decoded.servers))
+            settingsStore.saveServersList(StoredServerResolver.encode(decoded.servers))
         }
     }
 
-    val activePeer = peer.trim()
-    val activeServer by remember(activePeer, connPass, selectedServerId) {
+    val selectedPeer = peer.trim()
+    val activeServer by remember(selectedPeer, connPass, selectedServerId, tunnelRunning, activeTunnelNode) {
         derivedStateOf {
-            serverList.firstOrNull { it.id == selectedServerId && nodeMatchesActiveConfig(it, activePeer, connPass) }
-                ?: serverList.firstOrNull { nodeMatchesActiveConfig(it, activePeer, connPass) }
-                ?: serverList.firstOrNull { nodeMatchesActiveEndpoint(it, activePeer) }
+            StoredServerResolver.findDisplayServer(
+                servers = serverList,
+                tunnelRunning = tunnelRunning,
+                peer = selectedPeer,
+                password = connPass,
+                selectedServerId = selectedServerId,
+                activeTunnelNode = activeTunnelNode
+            )
         }
     }
+    val activeServerName = activeServer?.name
+        ?: if (tunnelRunning && activeTunnelNode.peer.isNotBlank()) activeTunnelNode.peer else "Не выбран"
 
     var showDiagnosticDialog by remember { mutableStateOf(false) }
     var sessionTickerMs by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
@@ -385,7 +325,7 @@ fun SettingsTab() {
             currentUploadSpeed = currentUploadSpeed,
             currentDownloadSpeed = currentDownloadSpeed,
             displayedGraphPoints = displayedGraphPoints,
-            activeServerName = activeServer?.name ?: "Не выбран",
+            activeServerName = activeServerName,
             jiggleRotation = jiggleRotation,
             jiggleTx = jiggleTx,
             jiggleTy = jiggleTy,

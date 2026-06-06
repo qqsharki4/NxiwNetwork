@@ -54,9 +54,11 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.nxiwnetwork.client.AvailableUpdate
 import com.nxiwnetwork.client.CoreBackend
+import com.nxiwnetwork.client.NxiwNetworkServer
 import com.nxiwnetwork.client.ReleaseUpdater
 import com.nxiwnetwork.client.filterChangelogForVersion
 import com.nxiwnetwork.client.SettingsStore
+import com.nxiwnetwork.client.StoredServerResolver
 import com.nxiwnetwork.client.TunnelManager
 import com.nxiwnetwork.client.UpdateAvailableDialog
 import com.nxiwnetwork.client.UpdateCheckCoordinator
@@ -1631,10 +1633,14 @@ suspend fun addServerToStoreDirect(context: Context, settingsStore: SettingsStor
     val pass = json.optString("password", "").trim()
     if (ip.isBlank()) return
 
-    val currentArray = try { JSONArray(settingsStore.savedServersJson.first()) } catch (e: Exception) { JSONArray() }
-    val newObj = JSONObject().apply { put("id", UUID.randomUUID().toString()); put("name", name); put("ip", ip); put("password", pass) }
-    currentArray.put(newObj)
-    settingsStore.saveServersList(currentArray.toString())
+    val decoded = StoredServerResolver.decode(settingsStore.savedServersJson.first())
+    val updatedServers = decoded.servers + NxiwNetworkServer(
+        id = UUID.randomUUID().toString(),
+        name = name,
+        ip = ip,
+        password = pass
+    )
+    settingsStore.saveServersList(StoredServerResolver.encode(updatedServers))
 
     withContext(Dispatchers.Main) { Toast.makeText(context, "Сервер '$name' добавлен", Toast.LENGTH_SHORT).show() }
 }
