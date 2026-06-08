@@ -12,6 +12,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.VpnService
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
@@ -280,6 +281,11 @@ class TunnelService : Service() {
         updateJob = TunnelManager.scope.launch(Dispatchers.Main) {
             delay(1000)
             while (isActive) {
+                if (TunnelManager.running.value && VpnService.prepare(this@TunnelService) != null) {
+                    Log.w("TunnelService", "VPN ownership lost, stopping Nxiw tunnel")
+                    stopTunnel()
+                    break
+                }
                 if (!TunnelManager.running.value && !isTunnelPaused) {
                     // Туннель полностью остановлен (не на паузе) — убиваем сервис
                     stopSelf()

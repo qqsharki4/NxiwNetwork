@@ -1544,7 +1544,12 @@ fun PerformanceSettings(onBack: () -> Unit) {
                         onClick = {
                             if (!selected) animateCaptchaSelection = true
                             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            scope.launch { settingsStore.saveCaptchaMode(captchaModeForMethod(v)); settingsStore.saveCaptchaSolveMethod(v) }
+                            val mode = captchaModeForMethod(v)
+                            TunnelManager.setCaptchaMode(mode)
+                            scope.launch {
+                                settingsStore.saveCaptchaMode(mode)
+                                settingsStore.saveCaptchaSolveMethod(v)
+                            }
                         }
                     ) { Text(l, fontSize = 14.sp) }
                 }

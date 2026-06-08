@@ -14,6 +14,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
@@ -1002,11 +1003,31 @@ object TunnelManager {
             currentParams = currentParams?.copy(workersPerHash = initialWorkers.coerceIn(1, 72))
             settingsStore.workersPerHash
                 .map { it.coerceIn(1, 72) }
-                .collectLatest { requested ->
-                    val applied = currentParams?.workersPerHash?.coerceIn(1, 72)
-                    if (requested == applied) return@collectLatest
-                    scheduleWorkerCountApply(requested)
+                .combine(settingsStore.captchaMode.map { normalizeRuntimeCaptchaMode(it) }) { workers, captchaMode ->
+                    workers to captchaMode
                 }
+                .collectLatest { (requestedWorkers, requestedCaptchaMode) ->
+                    if (requestedCaptchaMode != currentCaptchaMode) {
+                        setCaptchaMode(requestedCaptchaMode)
+                    }
+                    val applied = currentParams?.workersPerHash?.coerceIn(1, 72)
+                    if (requestedWorkers == applied) return@collectLatest
+                    scheduleWorkerCountApply(requestedWorkers)
+                }
+        }
+    }
+
+    fun setCaptchaMode(mode: String) {
+        val normalized = normalizeRuntimeCaptchaMode(mode)
+        currentCaptchaMode = normalized
+        currentParams = currentParams?.copy(captchaMode = normalized)
+    }
+
+    private fun normalizeRuntimeCaptchaMode(mode: String): String {
+        return if (mode.equals("wv", ignoreCase = true) || mode.equals("manual", ignoreCase = true)) {
+            "wv"
+        } else {
+            "auto"
         }
     }
 
