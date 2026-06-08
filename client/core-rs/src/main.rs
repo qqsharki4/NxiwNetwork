@@ -1,9 +1,7 @@
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
-use base64::Engine;
 use bytes::Bytes;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::io::Write;
@@ -190,7 +188,7 @@ async fn run() -> Result<()> {
         contract_version, args_checksum
     );
     println!(
-        "[ЯДРО] Экспериментально: UDP/TCP TURN + DTLS data path. RJS Classic включён, slider fallback через WV."
+        "[ЯДРО] Экспериментально: UDP/TCP TURN + DTLS data path. Режимы капчи: WebView Auto / Manual."
     );
 
     let peer = resolve_socket_addr(&args.peer).context("разбор пира")?;
@@ -305,7 +303,7 @@ fn parse_core_args(args: &[String]) -> Result<CoreArgs> {
     let mut wrap_transport = false;
     let mut user_agent = "Mozilla/5.0".to_string();
     let mut fingerprint = "auto".to_string();
-    let mut captcha_mode = "rjs".to_string();
+    let mut captcha_mode = "auto".to_string();
     let mut keepalive_seconds = 10u64;
     let mut turn_host = None;
     let mut turn_port = None;
@@ -327,7 +325,7 @@ fn parse_core_args(args: &[String]) -> Result<CoreArgs> {
             "-password" => password = next_value(args, &mut index),
             "-user-agent" => user_agent = next_value(args, &mut index),
             "-fingerprint" => fingerprint = normalize_fingerprint(&next_value(args, &mut index)),
-            "-captcha-mode" => captcha_mode = next_value(args, &mut index),
+            "-captcha-mode" => captcha_mode = normalize_captcha_mode(&next_value(args, &mut index)),
             "-keepalive-sec" => {
                 keepalive_seconds = next_value(args, &mut index)
                     .parse()
@@ -2674,6 +2672,13 @@ struct CaptchaError {
     attempt: String,
 }
 
+fn normalize_captcha_mode(mode: &str) -> String {
+    match mode.trim().to_lowercase().as_str() {
+        "wv" => "wv".to_string(),
+        _ => "auto".to_string(),
+    }
+}
+
 struct CaptchaTokenCache {
     token: String,
     usages: i32,
@@ -2733,414 +2738,28 @@ async fn solve_captcha(
     captcha_tx: broadcast::Sender<String>,
     profile: &BotProfile,
 ) -> Result<String> {
+    let _ = profile;
     match args.captcha_mode.as_str() {
         "wv" => {
-            println!("[КАПЧА] Режим: WebView");
-            solve_captcha_via_webview(captcha, captcha_tx).await
-        }
-        "rjs_slider" => {
-            println!("[КАПЧА] Режим: RJS Slider (Rust: classic first, WV fallback)");
-            match solve_captcha_via_rjs_classic(args, captcha, profile).await {
-                Ok(token) => Ok(token),
-                Err(err) => {
-                    println!("[КАПЧА] RJS Slider fallback: classic не прошёл: {err:#}");
-                    solve_captcha_via_webview(captcha, captcha_tx).await
-                }
-            }
+            println!("[КАПЧА] Режим: WebView (Manual)");
+            solve_captcha_via_webview(captcha, captcha_tx, "manual").await
         }
         _ => {
-            println!("[КАПЧА] Режим: RJS Classic");
-            solve_captcha_via_rjs_classic(args, captcha, profile).await
+            println!("[КАПЧА] Режим: WebView (Auto)");
+            solve_captcha_via_webview(captcha, captcha_tx, "auto").await
         }
     }
-}
-
-async fn solve_captcha_via_rjs_classic(
-    args: &CoreArgs,
-    captcha: &CaptchaError,
-    profile: &BotProfile,
-) -> Result<String> {
-    println!("[КАПЧА] RJS: Загрузка страницы капчи...");
-    let (pow_input, difficulty) =
-        fetch_pow_input(&captcha.redirect_uri, &profile.user_agent).await?;
-    let mut rng = SimpleRng::new(captcha_seed(args, captcha));
-    let timing = CaptchaTiming::generate(&mut rng);
-
-    println!("[КАПЧА] RJS: Человек осматривает страницу капчи...");
-    time::sleep(Duration::from_millis(timing.read_captcha_ms)).await;
-
-    println!("[КАПЧА] RJS: Решение PoW...");
-    let hash = tokio::task::spawn_blocking(move || solve_pow(&pow_input, difficulty))
-        .await
-        .context("PoW task join")?;
-    if hash.is_empty() {
-        bail!("PoW не найден");
-    }
-    time::sleep(Duration::from_millis(timing.fetch_pow_ms)).await;
-
-    println!("[КАПЧА] RJS: Отправка данных...");
-    let token = call_captcha_not_robot(&captcha.session_token, &hash, &mut rng, &timing, profile)
-        .await
-        .context("ошибка captchaNotRobot API")?;
-
-    println!("[КАПЧА] RJS: Завершение сессии...");
-    time::sleep(Duration::from_millis(timing.end_session_ms)).await;
-    let base = format!(
-        "session_token={}&domain=vk.com&adFp=&access_token=",
-        urlencoding::encode(&captcha.session_token)
-    );
-    let captcha_headers = botgen::captcha_browser_profile(profile);
-    let _ = captcha_api_request("captchaNotRobot.endSession", &base, &captcha_headers).await;
-
-    println!("[КАПЧА] RJS: Капча решена успешно ✓");
-    Ok(token)
-}
-
-async fn fetch_pow_input(redirect_uri: &str, user_agent: &str) -> Result<(String, usize)> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .build()
-        .context("создание HTTP клиента капчи")?;
-    let html = client
-        .get(redirect_uri)
-        .header("User-Agent", user_agent)
-        .header(
-            "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        )
-        .send()
-        .await
-        .context("загрузка HTML капчи")?
-        .text()
-        .await
-        .context("чтение HTML капчи")?;
-    parse_pow_input(&html)
-}
-
-fn parse_pow_input(html: &str) -> Result<(String, usize)> {
-    let pow_input = extract_between(html, "const powInput", "\"", "\"")
-        .or_else(|| extract_between(html, "powInput", "\"", "\""))
-        .context("powInput не найден в HTML капчи")?;
-    let difficulty = html
-        .split("startsWith('0'.repeat(")
-        .nth(1)
-        .and_then(|tail| tail.split(')').next())
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(2);
-    Ok((pow_input, difficulty))
-}
-
-fn extract_between(text: &str, anchor: &str, left: &str, right: &str) -> Option<String> {
-    let after_anchor = text.split_once(anchor)?.1;
-    let after_left = after_anchor.split_once(left)?.1;
-    let value = after_left.split_once(right)?.0;
-    Some(value.to_string())
-}
-
-fn solve_pow(pow_input: &str, difficulty: usize) -> String {
-    let target = "0".repeat(difficulty);
-    for nonce in 1..=10_000_000usize {
-        let mut hasher = Sha256::new();
-        hasher.update(pow_input.as_bytes());
-        hasher.update(nonce.to_string().as_bytes());
-        let hash = format!("{:x}", hasher.finalize());
-        if hash.starts_with(&target) {
-            return hash;
-        }
-    }
-    String::new()
-}
-
-async fn call_captcha_not_robot(
-    session_token: &str,
-    hash: &str,
-    rng: &mut SimpleRng,
-    timing: &CaptchaTiming,
-    profile: &BotProfile,
-) -> Result<String> {
-    let captcha_headers = botgen::captcha_browser_profile(profile);
-    let captcha_browser_fp = if profile.browser_fp.trim().is_empty() {
-        format!("{:016x}{:016x}", rng.next_u64(), rng.next_u64())
-    } else {
-        profile.browser_fp.clone()
-    };
-    let captcha_device_json = if profile.device_json.trim().is_empty() {
-        r#"{"screenWidth":1920,"screenHeight":1080,"screenAvailWidth":1920,"screenAvailHeight":1032,"innerWidth":1920,"innerHeight":945,"devicePixelRatio":1,"language":"en-US","languages":["en-US"],"webdriver":false,"hardwareConcurrency":16,"deviceMemory":8,"connectionEffectiveType":"4g","notificationsPermission":"denied"}"#.to_string()
-    } else {
-        profile.device_json.clone()
-    };
-    let base = format!(
-        "session_token={}&domain=vk.com&adFp=&access_token=",
-        urlencoding::encode(session_token)
-    );
-
-    println!("[КАПЧА]   Шаг 1/4: settings...");
-    captcha_api_request("captchaNotRobot.settings", &base, &captcha_headers).await?;
-
-    println!("[КАПЧА]   ...пауза: изучение виджета...");
-    time::sleep(Duration::from_millis(timing.settings_to_component_ms)).await;
-
-    println!("[КАПЧА]   Шаг 2/4: componentDone...");
-    let component_done = format!(
-        "{base}&browser_fp={}&device={}",
-        captcha_browser_fp,
-        urlencoding::encode(&captcha_device_json)
-    );
-    captcha_api_request(
-        "captchaNotRobot.componentDone",
-        &component_done,
-        &captcha_headers,
-    )
-    .await?;
-
-    println!("[КАПЧА]   ...пауза: движение мыши к чекбоксу + клик...");
-    time::sleep(Duration::from_millis(timing.component_to_check_ms)).await;
-    if timing.extra_pause_ms > 0 {
-        println!("[КАПЧА]   ...дополнительная пауза: человек завис...");
-        time::sleep(Duration::from_millis(timing.extra_pause_ms)).await;
-    }
-
-    println!("[КАПЧА]   Шаг 3/4: check...");
-    let answer = base64::engine::general_purpose::STANDARD.encode(b"{}");
-    let check_data = format!(
-        "{base}&accelerometer={}&gyroscope={}&motion={}&cursor={}&taps={}&connectionRtt={}&connectionDownlink={}&browser_fp={}&hash={}&answer={}&debug_info={}",
-        urlencoding::encode(&profile.accelerometer),
-        urlencoding::encode(&profile.gyroscope),
-        urlencoding::encode(&profile.motion),
-        urlencoding::encode(&profile.cursor_json),
-        urlencoding::encode(&profile.taps),
-        urlencoding::encode(&generate_connection_rtt(rng)),
-        urlencoding::encode(&profile.downlink),
-        captcha_browser_fp,
-        hash,
-        answer,
-        &profile.debug_info,
-    );
-    let check = captcha_api_request("captchaNotRobot.check", &check_data, &captcha_headers).await?;
-    let response = check
-        .get("response")
-        .and_then(Value::as_object)
-        .with_context(|| format!("invalid check response: {check}"))?;
-    let status = response
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if status != "OK" {
-        bail!("check status: {status}");
-    }
-    let token = response
-        .get("success_token")
-        .and_then(Value::as_str)
-        .filter(|token| !token.is_empty())
-        .context("success_token not found")?;
-
-    time::sleep(Duration::from_millis(timing.check_to_end_ms)).await;
-    Ok(token.to_string())
-}
-
-async fn captcha_api_request(
-    method: &str,
-    body: &str,
-    browser_profile: &botgen::BrowserProfile,
-) -> Result<Value> {
-    let url = format!("https://api.vk.ru/method/{method}?v=5.131");
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .build()
-        .context("создание HTTP клиента captcha API")?;
-    let text = client
-        .post(url)
-        .header("User-Agent", &browser_profile.user_agent)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .header("Origin", "https://id.vk.ru")
-        .header("Referer", "https://id.vk.ru/")
-        .header("sec-ch-ua-platform", &browser_profile.sec_ch_ua_platform)
-        .header("sec-ch-ua", &browser_profile.sec_ch_ua)
-        .header("sec-ch-ua-mobile", &browser_profile.sec_ch_ua_mobile)
-        .header("Sec-Fetch-Site", "same-site")
-        .header("Sec-Fetch-Mode", "cors")
-        .header("Sec-Fetch-Dest", "empty")
-        .header("DNT", "1")
-        .header("Priority", "u=1, i")
-        .header("Accept", "*/*")
-        .header("Accept-Language", "en-US,en;q=0.9")
-        .body(body.to_string())
-        .send()
-        .await
-        .with_context(|| format!("{method} request"))?
-        .text()
-        .await
-        .with_context(|| format!("{method} response body"))?;
-    serde_json::from_str(&text).with_context(|| format!("{method} JSON: {text}"))
-}
-
-fn generate_debug_info(device_id: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(device_id.as_bytes());
-    hasher.update(b"_debug_info_static_salt_v2");
-    format!("{:x}", hasher.finalize())
-}
-
-fn captcha_seed(args: &CoreArgs, captcha: &CaptchaError) -> u64 {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos() as u64)
-        .unwrap_or(0);
-    let mut hasher = Sha256::new();
-    hasher.update(args.device_id.as_bytes());
-    hasher.update(captcha.session_token.as_bytes());
-    let digest = hasher.finalize();
-    let mut seed = nanos;
-    for byte in digest.iter().take(8) {
-        seed = seed.rotate_left(5) ^ (*byte as u64);
-    }
-    seed
-}
-
-struct SimpleRng {
-    state: u64,
-}
-
-impl SimpleRng {
-    fn new(seed: u64) -> Self {
-        Self { state: seed | 1 }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.state;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.state = x;
-        x
-    }
-
-    fn next_f64(&mut self) -> f64 {
-        (self.next_u64() as f64) / (u64::MAX as f64)
-    }
-
-    fn gen_range_u64(&mut self, start: u64, end: u64) -> u64 {
-        if end <= start {
-            return start;
-        }
-        start + (self.next_u64() % (end - start))
-    }
-}
-
-struct CaptchaTiming {
-    fetch_pow_ms: u64,
-    read_captcha_ms: u64,
-    settings_to_component_ms: u64,
-    component_to_check_ms: u64,
-    check_to_end_ms: u64,
-    end_session_ms: u64,
-    extra_pause_ms: u64,
-}
-
-impl CaptchaTiming {
-    fn generate(rng: &mut SimpleRng) -> Self {
-        let fetch_pow_ms = 600 + rng.gen_range_u64(0, 800);
-        let read_captcha_ms = 700 + rng.gen_range_u64(0, 1200);
-        let mut settings_to_component_ms = 800 + rng.gen_range_u64(0, 1200);
-        let mut component_to_check_ms = 1500 + rng.gen_range_u64(0, 2000);
-        let mut check_to_end_ms = 400 + rng.gen_range_u64(0, 800);
-        let end_session_ms = 100 + rng.gen_range_u64(0, 200);
-        let extra_pause_ms = if rng.next_f64() < 0.10 {
-            800 + rng.gen_range_u64(0, 1500)
-        } else {
-            0
-        };
-
-        let total = fetch_pow_ms
-            + read_captcha_ms
-            + settings_to_component_ms
-            + component_to_check_ms
-            + check_to_end_ms
-            + end_session_ms
-            + extra_pause_ms;
-        if total < 5000 {
-            let deficit = 5000 - total + rng.gen_range_u64(0, 1000);
-            component_to_check_ms += deficit * 40 / 100;
-            settings_to_component_ms += deficit * 25 / 100;
-            check_to_end_ms += deficit * 15 / 100;
-        }
-
-        Self {
-            fetch_pow_ms,
-            read_captcha_ms,
-            settings_to_component_ms,
-            component_to_check_ms,
-            check_to_end_ms,
-            end_session_ms,
-            extra_pause_ms,
-        }
-    }
-}
-
-fn generate_captcha_cursor(rng: &mut SimpleRng) -> String {
-    let start_x = 200.0 + rng.next_f64() * 1520.0;
-    let start_y = 200.0 + rng.next_f64() * 680.0;
-    let target_x = 960.0 + (rng.next_f64() - 0.5) * 200.0;
-    let target_y = 540.0 + (rng.next_f64() - 0.5) * 100.0 + 30.0;
-    let cp1x = start_x + (rng.next_f64() - 0.5) * 500.0;
-    let cp1y = start_y + (rng.next_f64() - 0.5) * 300.0;
-    let cp2x = target_x + (rng.next_f64() - 0.5) * 150.0;
-    let cp2y = target_y + (rng.next_f64() - 0.5) * 80.0;
-    let points = 6 + rng.gen_range_u64(0, 7) as usize;
-    let mut out = Vec::with_capacity(points);
-    for i in 0..points {
-        let t = i as f64 / (points.saturating_sub(1).max(1) as f64);
-        let mt = 1.0 - t;
-        let mut x = mt * mt * mt * start_x
-            + 3.0 * mt * mt * t * cp1x
-            + 3.0 * mt * t * t * cp2x
-            + t * t * t * target_x;
-        let mut y = mt * mt * mt * start_y
-            + 3.0 * mt * mt * t * cp1y
-            + 3.0 * mt * t * t * cp2y
-            + t * t * t * target_y;
-        x += rng.next_f64() * 3.0 - 1.5;
-        y += rng.next_f64() * 3.0 - 1.5;
-        out.push(format!(r#"{{"x":{x:.1},"y":{y:.1}}}"#));
-    }
-    format!("[{}]", out.join(","))
-}
-
-fn generate_downlink(rng: &mut SimpleRng) -> String {
-    let count = 7 + rng.gen_range_u64(0, 10) as usize;
-    let base = 10.0 + rng.next_f64() * 20.0;
-    let stabilize_after = 2 + rng.gen_range_u64(0, 3) as usize;
-    let mut values = Vec::with_capacity(count);
-    for i in 0..count {
-        let value = if i < stabilize_after {
-            base * (0.85 + rng.next_f64() * 0.3)
-        } else {
-            base * (0.98 + rng.next_f64() * 0.04)
-        };
-        values.push(format!("{value:.1}"));
-    }
-    format!("[{}]", values.join(","))
-}
-
-fn generate_connection_rtt(rng: &mut SimpleRng) -> String {
-    let count = 4 + rng.gen_range_u64(0, 6) as usize;
-    let base = 45.0 + rng.next_f64() * 80.0;
-    let mut values = Vec::with_capacity(count);
-    for _ in 0..count {
-        let value = base * (0.85 + rng.next_f64() * 0.3);
-        values.push(format!("{value:.0}"));
-    }
-    format!("[{}]", values.join(","))
 }
 
 async fn solve_captcha_via_webview(
     captcha: &CaptchaError,
     captcha_tx: broadcast::Sender<String>,
+    request_mode: &str,
 ) -> Result<String> {
     let mut rx = captcha_tx.subscribe();
     println!(
-        "CAPTCHA_SOLVE|{}|{}",
-        captcha.redirect_uri, captcha.session_token
+        "CAPTCHA_SOLVE|{}|{}|{}",
+        request_mode, captcha.redirect_uri, captcha.session_token
     );
     let _ = std::io::stdout().flush();
     let result = time::timeout(Duration::from_secs(300), rx.recv())

@@ -18,7 +18,7 @@ import (
 var (
 	vkAppID     atomic.Value // string
 	vkAppSecret atomic.Value // string
-	captchaMode atomic.Value // string — "reverse_js" или "webview"
+	captchaMode atomic.Value // string — "auto" или "wv"
 )
 
 // CaptchaSolver — канал для получения токена капчи из внешнего решателя (WebView)
@@ -153,7 +153,7 @@ func main() {
 	deviceID := flag.String("device-id", "unknown", "уникальный ID устройства")
 	userAgent := flag.String("user-agent", "", "User-Agent строка устройства")
 	connPassword := flag.String("password", "", "пароль подключения")
-	captchaModeFlag := flag.String("captcha-mode", "rjs", "режим капчи: wv, rjs или rjs_slider")
+	captchaModeFlag := flag.String("captcha-mode", "auto", "режим капчи: auto или wv")
 	trafficFingerprint := flag.String("fingerprint", "auto", "fingerprint трафика: auto, chrome, safari, firefox")
 	keepaliveSeconds := flag.Int("keepalive-sec", 10, "интервал keepalive клиента в секундах (5-60)")
 

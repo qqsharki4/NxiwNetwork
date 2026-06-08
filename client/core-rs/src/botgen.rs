@@ -131,11 +131,6 @@ pub fn generate_bot_profile(
     }
 }
 
-pub fn captcha_browser_profile(profile: &BotProfile) -> BrowserProfile {
-    let ua = normalize_captcha_user_agent(&profile.user_agent);
-    default_browser_profile(&ua, "auto").0
-}
-
 fn default_browser_profile(
     real_user_agent: &str,
     fingerprint: &str,
@@ -197,15 +192,6 @@ fn infer_fingerprint_from_user_agent(user_agent: &str) -> String {
         "linux".to_string()
     } else {
         "chrome".to_string()
-    }
-}
-
-fn normalize_captcha_user_agent(user_agent: &str) -> String {
-    let lower = user_agent.to_ascii_lowercase();
-    if lower.contains("android") || lower.contains("mobile") {
-        windows_chrome_profile().user_agent
-    } else {
-        user_agent.trim().to_string()
     }
 }
 
