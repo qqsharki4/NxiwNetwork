@@ -96,16 +96,13 @@ import java.net.Socket
 import kotlin.math.roundToInt
 
 fun captchaModeForMethod(method: String): String = when (method) {
-    "rjs_classic" -> "rjs"
-    "rjs_slider" -> "rjs_slider"
-    "auto" -> "rjs"
+    "auto" -> "auto"
     else -> "wv"
 }
 
 val captchaMethodOptions = listOf(
-    "manual" to "WebView",
-    "rjs_classic" to "RJS",
-    "rjs_slider" to "Slider"
+    "manual" to "WebView (Manual)",
+    "auto" to "WebView (Auto)"
 )
 
 enum class WidgetType(val title: String, val icon: ImageVector, val isWide: Boolean = false, val isUserWidget: Boolean = true) {

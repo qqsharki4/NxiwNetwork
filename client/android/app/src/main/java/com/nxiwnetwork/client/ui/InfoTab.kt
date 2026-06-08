@@ -199,7 +199,11 @@ private fun normalizeDnsType(dns: String): String {
 }
 
 private fun normalizeCaptchaMethod(method: String): String {
-    return if (captchaMethodOptions.any { it.first == method }) method else "manual"
+    return when {
+        captchaMethodOptions.any { it.first == method } -> method
+        method == "rjs_classic" || method == "rjs_slider" -> "auto"
+        else -> "manual"
+    }
 }
 
 private fun buildInitialVkHashFields(hashes: String): List<VkHashFieldUi> {
@@ -1532,7 +1536,7 @@ fun PerformanceSettings(onBack: () -> Unit) {
                 modifier = Modifier.fillMaxWidth().height(SEGMENTED_CONTROL_HEIGHT)
             ) {
                 captchaMethodOptions.forEachIndexed { i, (v, l) ->
-                    val selected = captchaMethod == v || (captchaMethod == "auto" && v == "rjs_classic")
+                    val selected = captchaMethod == v
                     SegmentedButton(
                         selected = selected,
                         shape = SegmentedButtonDefaults.itemShape(index = i, count = captchaMethodOptions.size),

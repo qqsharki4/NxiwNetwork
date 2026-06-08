@@ -93,7 +93,7 @@ object TunnelManager {
     private var currentParams: TunnelParams? = null
     private var lastContext: Context? = null
     private var forceRegenerateUA = false 
-    private var currentCaptchaMode = "rjs"
+    private var currentCaptchaMode = "auto"
 
     val running = MutableStateFlow(false)
     val logs = MutableStateFlow<List<LogEntry>>(emptyList())
@@ -626,19 +626,25 @@ object TunnelManager {
                     }
 
                     if (lineTrim.startsWith("CAPTCHA_SOLVE|")) {
-                        if (currentCaptchaMode == "wv") {
-                            val parts = lineTrim.substringAfter("CAPTCHA_SOLVE|").split("|", limit = 2)
-                            if (parts.size == 2) {
+                        val payload = lineTrim.substringAfter("CAPTCHA_SOLVE|")
+                        val parts = payload.split("|")
+                        when (parts.size) {
+                            2 -> {
                                 val redirectUri = parts[0]
                                 val sessionToken = parts[1]
                                 scope.launch {
-                                    handleCaptchaSolve(redirectUri, sessionToken)
+                                    handleCaptchaSolve("selected", redirectUri, sessionToken)
                                 }
-                            } else {
-                                writeCaptchaResult("error:invalid CAPTCHA_SOLVE format")
                             }
-                        } else {
-                            writeCaptchaResult("error:wv mode not enabled")
+                            3 -> {
+                                val requestMode = parts[0]
+                                val redirectUri = parts[1]
+                                val sessionToken = parts[2]
+                                scope.launch {
+                                    handleCaptchaSolve(requestMode, redirectUri, sessionToken)
+                                }
+                            }
+                            else -> writeCaptchaResult("error:invalid CAPTCHA_SOLVE format")
                         }
                         return@forEachLine
                     }
@@ -1077,12 +1083,29 @@ object TunnelManager {
         }
     }
 
-    private suspend fun handleCaptchaSolve(redirectUri: String, sessionToken: String) {
-        updateLog("captcha_wv_step_1", "[КАПЧА WBV] Создание WebView...", 5, false)
+    private suspend fun handleCaptchaSolve(requestMode: String, redirectUri: String, sessionToken: String) {
+        val ctx = lastContext ?: run {
+            writeCaptchaResult("error:context is null")
+            return
+        }
+        val mode = requestMode.lowercase()
 
         try {
-            val ctx = lastContext ?: return
-            val token = ManlCaptchaWebViewManager.solveCaptchaAsync(ctx, redirectUri, sessionToken)
+            val token = when (mode) {
+                "auto" -> solveSingleAutoWebViewCaptcha(redirectUri, sessionToken)
+                "manual" -> {
+                    updateLog("captcha_wv_step_1", "[КАПЧА WBV] Создание ручного WebView...", 5, false)
+                    ManlCaptchaWebViewManager.solveCaptchaAsync(ctx, redirectUri, sessionToken)
+                }
+                else -> {
+                    if (currentCaptchaMode == "auto") {
+                        solveAutoWebViewCaptcha(ctx, redirectUri, sessionToken)
+                    } else {
+                        updateLog("captcha_wv_step_1", "[КАПЧА WBV] Создание ручного WebView...", 5, false)
+                        ManlCaptchaWebViewManager.solveCaptchaAsync(ctx, redirectUri, sessionToken)
+                    }
+                }
+            }
             updateLog("captcha_wv_step_4", "[КАПЧА WBV] Капча решена ✓", 5, false)
             writeCaptchaResult(token)
         } catch (e: IllegalStateException) {
@@ -1090,8 +1113,8 @@ object TunnelManager {
             updateLog("captcha_wv_err", "[КАПЧА WBV] $errorMsg", 5, true)
             writeCaptchaResult("error:$errorMsg")
         } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
-            updateLog("captcha_wv_err", "[КАПЧА WBV] Таймаут (45с)", 5, true)
-            writeCaptchaResult("error:timeout (45s)")
+            updateLog("captcha_wv_err", "[КАПЧА WBV] Таймаут WebView", 5, true)
+            writeCaptchaResult("error:timeout")
         } catch (e: kotlin.coroutines.cancellation.CancellationException) {
             updateLog("captcha_wv_err", "[КАПЧА WBV] Отменено", 5, true)
             writeCaptchaResult("error:cancelled")
@@ -1104,6 +1127,44 @@ object TunnelManager {
         }
 
         updateLog("captcha_wv_step_6", "[КАПЧА WBV] WebView уничтожен", 5, false)
+    }
+
+    private suspend fun solveSingleAutoWebViewCaptcha(
+        redirectUri: String,
+        sessionToken: String
+    ): String {
+        updateLog("captcha_wv_step_1", "[КАПЧА WBV] Авто WebView попытка 10с...", 5, false)
+        return CaptchaWebViewManager.solveCaptchaAsync(redirectUri, sessionToken) { step ->
+            updateLog("captcha_wv_auto_step", "[КАПЧА WBV] $step", 5, false)
+        }
+    }
+
+    private suspend fun solveAutoWebViewCaptcha(
+        ctx: Context,
+        redirectUri: String,
+        sessionToken: String
+    ): String {
+        for (attempt in 1..2) {
+            updateLog("captcha_wv_step_1", "[КАПЧА WBV] Авто WebView попытка $attempt/2...", 5, false)
+            try {
+                return CaptchaWebViewManager.solveCaptchaAsync(redirectUri, sessionToken) { step ->
+                    updateLog("captcha_wv_auto_step", "[КАПЧА WBV] $step", 5, false)
+                }
+            } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+                updateLog("captcha_wv_timeout_$attempt", "[КАПЧА WBV] Авто таймаут 10с ($attempt/2)", 5, attempt == 2)
+                if (attempt == 2) {
+                    updateLog("captcha_wv_fallback", "[КАПЧА WBV] 2 таймаута авто, открыт ручной WebView", 5, false)
+                    return ManlCaptchaWebViewManager.solveCaptchaAsync(ctx, redirectUri, sessionToken)
+                }
+            } catch (e: IllegalStateException) {
+                if (e.message == CaptchaWebViewManager.ERROR_SLIDER_DETECTED) {
+                    updateLog("captcha_wv_fallback", "[КАПЧА WBV] Обнаружен слайдер, открыт ручной WebView", 5, false)
+                    return ManlCaptchaWebViewManager.solveCaptchaAsync(ctx, redirectUri, sessionToken)
+                }
+                throw e
+            }
+        }
+        return ManlCaptchaWebViewManager.solveCaptchaAsync(ctx, redirectUri, sessionToken)
     }
 
     private fun writeCaptchaResult(result: String) {
@@ -1164,7 +1225,7 @@ data class TunnelParams(
     val sni: String = "",
     val connectionPassword: String = "",
     val protocol: String = "udp",
-    val captchaMode: String = "rjs",
+    val captchaMode: String = "auto",
     val wrapTransport: Boolean = false,
     val wifiHighPerformance: Boolean = true,
     val clientKeepaliveSeconds: Int = 10

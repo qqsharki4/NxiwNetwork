@@ -9,45 +9,32 @@ import android.util.Log
 import android.view.MotionEvent
 import android.view.View
 import android.webkit.JavascriptInterface
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
-import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.random.Random
 
-/**
- * Управляет «невидимым» WebView для автоматического прохождения VK Smart Captcha.
- *
- * Один запрос = один свежий WebView:
- * 1. Создаёт WebView с рандомизированным fingerprint (UA, viewport)
- * 2. Загружает redirect_uri, ждёт ~2.7с загрузки
- * 3. Находит чекбокс "Я не робот" (label.vkc__Checkbox-module__Checkbox)
- * 4. Кликает в рандомную точку внутри label (3-6с "раздумий")
- * 5. JS-interceptor перехватывает captchaNotRobot.check → success_token
- * 6. Уничтожает WebView
- */
 object CaptchaWebViewManager {
 
     private const val TAG = "CaptchaWV"
-    private const val CAPTCHA_TIMEOUT_MS = 45_000L
+    private const val CAPTCHA_TIMEOUT_MS = 10_000L
     private const val WV_CREATE_TIMEOUT_MS = 3000L
+    const val ERROR_SLIDER_DETECTED = "slider_detected"
 
-    // Рандомизируемые параметры viewport (чтобы VK не видел одинаковый size)
     private val VIEWPORT_WIDTHS = intArrayOf(356, 358, 360, 362, 364, 366, 368)
     private val VIEWPORT_HEIGHTS = intArrayOf(376, 378, 380, 382, 384, 386, 388)
-
-    // Пул Chrome-версий (minor builds) для варьирования
     private val CHROME_BUILDS = arrayOf(
         "146.0.0.0", "145.0.6422.60", "145.0.6422.53",
         "144.0.6367.78", "144.0.6367.61", "143.0.6312.99"
@@ -63,11 +50,11 @@ object CaptchaWebViewManager {
     private var appContext: Context? = null
 
     private val pendingResult = AtomicReference<CompletableDeferred<Result<String>>?>(null)
+    private val postClickSliderWatcher = AtomicReference<Runnable?>(null)
 
     @Volatile
     private var currentWebView: WebView? = null
 
-    // Interceptor: перехватывает ответ captchaNotRobot.check → достаёт success_token
     private val interceptorJSCode = """
         (function() {
             if (window.__nxiw_interceptor_installed) return;
@@ -84,6 +71,11 @@ object CaptchaWebViewManager {
                         const data = await clone.json();
                         if (data.response && data.response.success_token) {
                             window.NxiwCaptcha.onSuccess(data.response.success_token);
+                        } else if (
+                            data.response &&
+                            data.response.show_captcha_type === 'slider'
+                        ) {
+                            window.NxiwCaptcha.onSliderDetected('check_response');
                         } else if (data.error) {
                             window.NxiwCaptcha.onError(JSON.stringify(data.error));
                         }
@@ -107,6 +99,11 @@ object CaptchaWebViewManager {
                             const data = JSON.parse(xhr.responseText);
                             if (data.response && data.response.success_token) {
                                 window.NxiwCaptcha.onSuccess(data.response.success_token);
+                            } else if (
+                                data.response &&
+                                data.response.show_captcha_type === 'slider'
+                            ) {
+                                window.NxiwCaptcha.onSliderDetected('check_response');
                             } else if (data.error) {
                                 window.NxiwCaptcha.onError(JSON.stringify(data.error));
                             }
@@ -117,10 +114,6 @@ object CaptchaWebViewManager {
             };
         })();
     """.trimIndent()
-
-    // ═══════════════════════════════════════════════════════════════
-    // Lifecycle
-    // ═══════════════════════════════════════════════════════════════
 
     fun onTunnelStart(context: Context) {
         appContext = context.applicationContext
@@ -136,16 +129,10 @@ object CaptchaWebViewManager {
         Log.d(TAG, "Туннель остановлен")
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // Публичный API
-    // ═══════════════════════════════════════════════════════════════
-
     suspend fun solveCaptchaAsync(redirectUri: String, sessionToken: String, onStep: (String) -> Unit = {}): String {
         if (!isTunnelActive) throw IllegalStateException("WV не готов — туннель не активен")
         val ctx = appContext ?: throw IllegalStateException("WV не готов — контекст null")
 
-        // Используем Mutex вместо AtomicBoolean: если запрашивается вторая капча до закрытия первой,
-        // она просто подождет в очереди (несколько секунд), вместо того чтобы вылетать с ошибкой.
         return captchaMutex.withLock {
             try {
                 withTimeout(CAPTCHA_TIMEOUT_MS) {
@@ -158,10 +145,6 @@ object CaptchaWebViewManager {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // Внутренняя логика
-    // ═══════════════════════════════════════════════════════════════
-
     private suspend fun doSolveCaptcha(context: Context, redirectUri: String, onStep: (String) -> Unit): String {
         val deferred = CompletableDeferred<Result<String>>()
         pendingResult.set(deferred)
@@ -171,14 +154,12 @@ object CaptchaWebViewManager {
 
         Log.d(TAG, "WebView создан ✓")
 
-        // Загружаем страницу капчи
         withContext(Dispatchers.Main) {
             webView.evaluateJavascript(interceptorJSCode, null)
             kotlinx.coroutines.delay(80)
             webView.loadUrl(redirectUri)
         }
 
-        // Ждём success_token от JS-bridge
         try {
             val token = deferred.await().getOrThrow()
             Log.d(TAG, "Капча решена ✓")
@@ -191,13 +172,8 @@ object CaptchaWebViewManager {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // Создание WebView с рандомизированным fingerprint
-    // ═══════════════════════════════════════════════════════════════
-
     @SuppressLint("SetJavaScriptEnabled")
     private fun createWebViewSync(context: Context, onStep: (String) -> Unit): WebView? {
-        // Рандомизируем параметры для КАЖДОГО запроса
         val vw = VIEWPORT_WIDTHS[Random.Default.nextInt(VIEWPORT_WIDTHS.size)]
         val vh = VIEWPORT_HEIGHTS[Random.Default.nextInt(VIEWPORT_HEIGHTS.size)]
         val chromeBuild = CHROME_BUILDS[Random.Default.nextInt(CHROME_BUILDS.size)]
@@ -228,7 +204,9 @@ object CaptchaWebViewManager {
 
                     webViewClient = object : WebViewClient() {
                         override fun onPageStarted(
-                            view: WebView, url: String?, favicon: android.graphics.Bitmap?
+                            view: WebView,
+                            url: String?,
+                            favicon: android.graphics.Bitmap?
                         ) {
                             super.onPageStarted(view, url, favicon)
                             view.evaluateJavascript(interceptorJSCode, null)
@@ -239,8 +217,8 @@ object CaptchaWebViewManager {
 
                             val isCaptchaPage = url?.let {
                                 it.contains("not_robot_captcha") ||
-                                it.contains("id.vk.ru/captcha") ||
-                                it.contains("not_robot")
+                                    it.contains("id.vk.ru/captcha") ||
+                                    it.contains("not_robot")
                             } ?: false
 
                             if (isCaptchaPage) {
@@ -248,8 +226,7 @@ object CaptchaWebViewManager {
                                 view.evaluateJavascript(interceptorJSCode, null)
 
                                 if (currentWebView === view && isTunnelActive) {
-                                    // Ждём 2.5-3.5с — реалистичная загрузка страницы
-                                    val pageLoadDelay = 2500L + Random.Default.nextLong(0, 1000)
+                                    val pageLoadDelay = 650L + Random.Default.nextLong(0, 550)
                                     mainHandler.postDelayed({
                                         if (currentWebView === view && isTunnelActive) {
                                             solveCaptchaAutomatedSync(view)
@@ -260,17 +237,15 @@ object CaptchaWebViewManager {
                         }
 
                         override fun shouldInterceptRequest(
-                            view: WebView, request: WebResourceRequest
-                        ): WebResourceResponse? {
-                            return super.shouldInterceptRequest(view, request)
-                        }
+                            view: WebView,
+                            request: WebResourceRequest
+                        ): WebResourceResponse? = super.shouldInterceptRequest(view, request)
 
                         override fun onReceivedSslError(
                             view: WebView,
                             handler: android.webkit.SslErrorHandler,
                             error: android.net.http.SslError
                         ) {
-                            // Разрешаем только для доверенных доменов VK/OK
                             val url = error.url ?: ""
                             if (url.contains("vk.ru") || url.contains("vk.com") || url.contains("okcdn.ru")) {
                                 handler.proceed()
@@ -317,6 +292,7 @@ object CaptchaWebViewManager {
     private fun destroyCurrentWebView() {
         val wv = currentWebView ?: return
         currentWebView = null
+        postClickSliderWatcher.getAndSet(null)?.let { mainHandler.removeCallbacks(it) }
 
         val destroyAction = Runnable {
             try {
@@ -345,40 +321,29 @@ object CaptchaWebViewManager {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // Авто-решение: клик по чекбоксу «Я не робот»
-    //
-    // Структура VK капчи (из HTML):
-    //   label.vkc__Checkbox-module__Checkbox          ← КЛИКАБЕЛЬНЫЙ label (~200x32px)
-    //     input#not-robot-captcha-checkbox             ← скрытый checkbox
-    //     div.vkc__Checkbox-module__Checkbox__iconBlock ← иконка чекбокса
-    //     div.vkc__Checkbox-module__Checkbox__title     ← текст "Я не робот"
-    //
-    // Стратегия: находим ВЕСЬ label, получаем его размеры,
-    // кликаем в РАНДОМНУЮ точку внутри него (не в центр).
-    // ═══════════════════════════════════════════════════════════════
-
     private fun solveCaptchaAutomatedSync(webView: WebView) {
         if (currentWebView !== webView || !isTunnelActive) return
 
-        // Ищем LABEL целиком (он большой, ~200x32px — как человек кликает)
         val findLabelJS = """
             (function() {
-                // Приоритет: label обёртка (самый большой кликабельный элемент)
+                var slider = document.querySelector(
+                    '[class*="SliderCaptcha"], [class*="Kaleidoscope"], ' +
+                    '.vkc__SliderCaptcha-module__description, ' +
+                    '.vkc__KaleidoscopeScreen-module__captchaId'
+                );
+                if (slider) return '${ERROR_SLIDER_DETECTED}';
+
                 var el = document.querySelector('label.vkc__Checkbox-module__Checkbox');
-                // Fallback: прямой поиск по ID
                 if (!el) el = document.querySelector('label[for="not-robot-captcha-checkbox"]');
-                // Fallback: сам чекбокс
                 if (!el) el = document.getElementById('not-robot-captcha-checkbox');
                 if (!el) return 'not_found';
-                
+
                 var rect = el.getBoundingClientRect();
                 var style = window.getComputedStyle(el);
                 if (rect.width < 5 || rect.height < 5 ||
                     style.display === 'none' || style.visibility === 'hidden') {
                     return 'not_found';
                 }
-                // Возвращаем left,top,width,height — чтобы кликнуть в РАНДОМНУЮ точку
                 return rect.left + ',' + rect.top + ',' + rect.width + ',' + rect.height;
             })();
         """.trimIndent()
@@ -389,8 +354,13 @@ object CaptchaWebViewManager {
 
             if (currentWebView !== webView || !isTunnelActive) return@evaluateJavascript
 
+            if (result == ERROR_SLIDER_DETECTED) {
+                Log.i(TAG, "Обнаружен слайдер — fallback на ручной WebView")
+                notifyResult(Result.failure(IllegalStateException(ERROR_SLIDER_DETECTED)))
+                return@evaluateJavascript
+            }
+
             if (result == "not_found" || result.split(",").size < 4) {
-                // Fallback: JS .click() — не идеально, но лучше чем ничего
                 Log.w(TAG, "Label не найден — JS-клик (fallback)")
                 val jsClick = """
                     (function() {
@@ -400,7 +370,11 @@ object CaptchaWebViewManager {
                         return 'nothing';
                     })();
                 """.trimIndent()
-                webView.evaluateJavascript(jsClick, null)
+                webView.evaluateJavascript(jsClick) { clickResult ->
+                    if ((clickResult ?: "").replace("\"", "") == "clicked") {
+                        startPostClickSliderWatcher(webView)
+                    }
+                }
                 return@evaluateJavascript
             }
 
@@ -410,30 +384,78 @@ object CaptchaWebViewManager {
             val width = parts[2].toFloatOrNull() ?: return@evaluateJavascript
             val height = parts[3].toFloatOrNull() ?: return@evaluateJavascript
 
-            // Рандомная точка внутри label (60-90% ширины, 25-75% высоты)
-            // Человек кликает не ровно в центр, а примерно туда
             val randX = left + width * (0.15f + Random.Default.nextFloat() * 0.7f)
             val randY = top + height * (0.25f + Random.Default.nextFloat() * 0.5f)
 
             Log.d(TAG, "Клик: (${randX.toInt()}, ${randY.toInt()}) в зоне ${width.toInt()}x${height.toInt()}")
 
-            // «Раздумье» перед кликом: 1.5-3.5 секунды (как человек)
-            val thinkDelay = 1500L + Random.Default.nextLong(0, 2000)
+            val thinkDelay = 420L + Random.Default.nextLong(0, 260)
 
             mainHandler.postDelayed({
                 if (currentWebView === webView && isTunnelActive) {
                     simulateHumanTouch(webView, randX, randY)
+                    startPostClickSliderWatcher(webView)
                 }
             }, thinkDelay)
         }
     }
 
-    /**
-     * Имитирует нативный тач как от пальца:
-     * - ACTION_DOWN с рандомным pressure (0.5-0.9)
-     * - Удержание 80-180мс (как палец на экране)
-     * - ACTION_UP с лёгким смещением (палец дрожит)
-     */
+    private fun startPostClickSliderWatcher(webView: WebView) {
+        postClickSliderWatcher.getAndSet(null)?.let { mainHandler.removeCallbacks(it) }
+
+        var attemptsLeft = 14
+        val watcher = object : Runnable {
+            override fun run() {
+                if (currentWebView !== webView || !isTunnelActive) return
+
+                val detectSliderJS = """
+                    (function() {
+                        var slider = document.querySelector(
+                            '[class*="SliderCaptcha"], [class*="Kaleidoscope"], ' +
+                            '.vkc__SliderCaptcha-module__description, ' +
+                            '.vkc__KaleidoscopeScreen-module__captchaId, ' +
+                            '.vkc__SwipeButton-module__track'
+                        );
+                        if (slider) return 'slider';
+
+                        var success = document.querySelector(
+                            '[class*="success"], [class*="Success"], [class*="passed"], [class*="Passed"]'
+                        );
+                        if (success) return 'success_ui';
+
+                        return 'none';
+                    })();
+                """.trimIndent()
+
+                webView.evaluateJavascript(detectSliderJS) { rawValue ->
+                    if (currentWebView !== webView || !isTunnelActive) return@evaluateJavascript
+
+                    val result = rawValue?.replace("\"", "") ?: "none"
+                    when (result) {
+                        "slider" -> {
+                            Log.i(TAG, "После checkbox появился слайдер — fallback на ручной WebView")
+                            notifyResult(Result.failure(IllegalStateException(ERROR_SLIDER_DETECTED)))
+                        }
+                        "success_ui" -> {
+                            postClickSliderWatcher.set(null)
+                        }
+                        else -> {
+                            attemptsLeft--
+                            if (attemptsLeft > 0) {
+                                mainHandler.postDelayed(this, 350L)
+                            } else {
+                                postClickSliderWatcher.set(null)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        postClickSliderWatcher.set(watcher)
+        mainHandler.postDelayed(watcher, 450L)
+    }
+
     private fun simulateHumanTouch(webView: WebView, cssX: Float, cssY: Float) {
         if (currentWebView !== webView) return
 
@@ -441,8 +463,6 @@ object CaptchaWebViewManager {
         val physX = cssX * density
         val physY = cssY * density
         val downTime = SystemClock.uptimeMillis()
-
-        // Рандомный pressure — палец нажимает с разной силой
         val pressure = 0.5f + Random.Default.nextFloat() * 0.4f
 
         val downEvent = MotionEvent.obtain(
@@ -452,12 +472,10 @@ object CaptchaWebViewManager {
         webView.dispatchTouchEvent(downEvent)
         downEvent.recycle()
 
-        // Удержание пальца: 80-180мс
         val holdTime = 80L + Random.Default.nextLong(0, 100)
 
         mainHandler.postDelayed({
             if (currentWebView === webView) {
-                // Лёгкое смещение при отпускании (палец не стоит идеально на месте)
                 val jitterX = physX + (-1f + Random.Default.nextFloat() * 2f) * density
                 val jitterY = physY + (-0.5f + Random.Default.nextFloat() * 1f) * density
 
@@ -472,10 +490,6 @@ object CaptchaWebViewManager {
         }, holdTime)
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // JS Bridge — вызывается из JavaScript background thread
-    // ═══════════════════════════════════════════════════════════════
-
     private class CaptchaJSBridge {
         @JavascriptInterface
         fun onSuccess(token: String) {
@@ -487,6 +501,12 @@ object CaptchaWebViewManager {
         fun onError(error: String) {
             Log.e(TAG, "JS: ошибка — $error")
             notifyResult(Result.failure(Exception("VK: $error")))
+        }
+
+        @JavascriptInterface
+        fun onSliderDetected(reason: String) {
+            Log.i(TAG, "JS: обнаружен слайдер — $reason")
+            notifyResult(Result.failure(IllegalStateException(ERROR_SLIDER_DETECTED)))
         }
     }
 

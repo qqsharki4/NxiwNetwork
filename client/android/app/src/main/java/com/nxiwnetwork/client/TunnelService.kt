@@ -77,7 +77,7 @@ class TunnelService : Service() {
                     sni = intent.getStringExtra("sni") ?: "",
                     connectionPassword = intent.getStringExtra("connection_password") ?: "",
                     protocol = intent.getStringExtra("protocol") ?: "udp",
-                    captchaMode = intent.getStringExtra("captcha_mode") ?: "rjs",
+                    captchaMode = intent.getStringExtra("captcha_mode") ?: "auto",
                     wrapTransport = intent.getBooleanExtra("wrap_transport", false),
                     wifiHighPerformance = intent.getBooleanExtra("wifi_high_performance", true),
                     clientKeepaliveSeconds = intent.getIntExtra("client_keepalive_seconds", 10)

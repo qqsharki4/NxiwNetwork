@@ -77,6 +77,7 @@ class SettingsStore(context: Context) {
         const val DEFAULT_DASHBOARD_WIDGETS = "NODE,CONTROL,PING,SESSION,WORKERS,SPEED,GRAPH"
         const val DEFAULT_SPEED_METRIC_MODE = "total"
         const val DEFAULT_TRAFFIC_FINGERPRINT = "auto"
+        const val DEFAULT_CAPTCHA_SOLVE_METHOD = "auto"
         const val DEFAULT_ANDROID_PING_HOME_INTERVAL_MS = 1_600
         const val DEFAULT_ANDROID_PING_BACKGROUND_INTERVAL_MS = 5 * 60 * 1000
         const val MIN_ANDROID_PING_HOME_INTERVAL_MS = 500
@@ -85,6 +86,7 @@ class SettingsStore(context: Context) {
         const val MAX_ANDROID_PING_BACKGROUND_INTERVAL_MS = 30 * 60 * 1000
         private val SPEED_METRIC_MODES = setOf("total", "up", "down")
         private val TRAFFIC_FINGERPRINTS = setOf("auto", "chrome", "safari", "firefox")
+        private val CAPTCHA_SOLVE_METHODS = setOf("manual", "auto")
 	
         // НОВЫЙ КЛЮЧ ДЛЯ MTU
         private val CUSTOM_MTU = intPreferencesKey("custom_mtu")
@@ -112,8 +114,18 @@ class SettingsStore(context: Context) {
     val deployMainPassword: Flow<String> = dataStore.data.map { it[DEPLOY_MAIN_PASSWORD] ?: "" }
     val deployAdminId: Flow<String> = dataStore.data.map { it[DEPLOY_ADMIN_ID] ?: "" }
     val deployBotToken: Flow<String> = dataStore.data.map { it[DEPLOY_BOT_TOKEN] ?: "" }
-    val captchaMode: Flow<String> = dataStore.data.map { it[CAPTCHA_MODE] ?: "wv" }
-    val captchaSolveMethod: Flow<String> = dataStore.data.map { it[CAPTCHA_SOLVE_METHOD] ?: "manual" }
+    val captchaMode: Flow<String> = dataStore.data.map {
+        normalizeCaptchaMode(
+            mode = it[CAPTCHA_MODE],
+            method = it[CAPTCHA_SOLVE_METHOD]
+        )
+    }
+    val captchaSolveMethod: Flow<String> = dataStore.data.map {
+        normalizeCaptchaSolveMethod(
+            method = it[CAPTCHA_SOLVE_METHOD],
+            mode = it[CAPTCHA_MODE]
+        )
+    }
     val isWhitelist: Flow<Boolean> = dataStore.data.map { it[IS_WHITELIST] ?: false }
     val themeMode: Flow<String> = dataStore.data.map { it[THEME_MODE] ?: "system" }
     val useDynamicColor: Flow<Boolean> = dataStore.data.map { it[USE_DYNAMIC_COLOR] ?: true }
@@ -174,8 +186,23 @@ class SettingsStore(context: Context) {
     suspend fun saveShowSystemApps(enabled: Boolean) { dataStore.edit { prefs -> prefs[SHOW_SYSTEM_APPS] = enabled } }
     suspend fun saveConnectionPassword(password: String) { dataStore.edit { prefs -> prefs[CONNECTION_PASSWORD] = password } }
     suspend fun saveDeploySecrets(mainPass: String, adminId: String, botToken: String, sshPort: String) { dataStore.edit { prefs -> prefs[DEPLOY_MAIN_PASSWORD] = mainPass; prefs[DEPLOY_ADMIN_ID] = adminId; prefs[DEPLOY_BOT_TOKEN] = botToken; prefs[DEPLOY_SSH_PORT] = sshPort } }
-    suspend fun saveCaptchaMode(mode: String) { dataStore.edit { prefs -> prefs[CAPTCHA_MODE] = mode } }
-    suspend fun saveCaptchaSolveMethod(method: String) { dataStore.edit { prefs -> prefs[CAPTCHA_SOLVE_METHOD] = method } }
+    suspend fun saveCaptchaMode(mode: String) {
+        dataStore.edit { prefs ->
+            val normalizedMode = normalizeCaptchaMode(mode = mode, method = prefs[CAPTCHA_SOLVE_METHOD])
+            prefs[CAPTCHA_MODE] = normalizedMode
+            prefs[CAPTCHA_SOLVE_METHOD] = normalizeCaptchaSolveMethod(
+                method = prefs[CAPTCHA_SOLVE_METHOD],
+                mode = normalizedMode
+            )
+        }
+    }
+    suspend fun saveCaptchaSolveMethod(method: String) {
+        dataStore.edit { prefs ->
+            val normalizedMethod = normalizeCaptchaSolveMethod(method = method, mode = prefs[CAPTCHA_MODE])
+            prefs[CAPTCHA_SOLVE_METHOD] = normalizedMethod
+            prefs[CAPTCHA_MODE] = normalizeCaptchaMode(mode = prefs[CAPTCHA_MODE], method = normalizedMethod)
+        }
+    }
     suspend fun saveIsWhitelist(enabled: Boolean) { dataStore.edit { prefs -> prefs[IS_WHITELIST] = enabled } }
     suspend fun saveExceptionsMode(packages: String, isWhitelist: Boolean) { dataStore.edit { prefs -> prefs[EXCLUDED_APPS] = packages; prefs[IS_WHITELIST] = isWhitelist } }
     suspend fun saveAutoConnect(enabled: Boolean) { dataStore.edit { prefs -> prefs[AUTO_CONNECT_ON_BOOT] = enabled } }
@@ -252,6 +279,25 @@ class SettingsStore(context: Context) {
 
     // НОВАЯ ФУНКЦИЯ СОХРАНЕНИЯ MTU
     suspend fun saveCustomMtu(mtu: Int) { dataStore.edit { prefs -> prefs[CUSTOM_MTU] = mtu } }
+
+    private fun normalizeCaptchaSolveMethod(method: String?, mode: String?): String {
+        val normalized = method?.trim()?.lowercase().orEmpty()
+        return when {
+            normalized in CAPTCHA_SOLVE_METHODS -> normalized
+            normalized == "rjs_classic" || normalized == "rjs_slider" -> "auto"
+            mode?.trim()?.lowercase() == "wv" -> "manual"
+            else -> DEFAULT_CAPTCHA_SOLVE_METHOD
+        }
+    }
+
+    private fun normalizeCaptchaMode(mode: String?, method: String?): String {
+        return when (mode?.trim()?.lowercase()) {
+            "wv" -> "wv"
+            "auto" -> "auto"
+            "rjs", "rjs_classic", "rjs_slider" -> "auto"
+            else -> if (normalizeCaptchaSolveMethod(method, mode) == "manual") "wv" else "auto"
+        }
+    }
 
     private suspend fun readStringMap(key: androidx.datastore.preferences.core.Preferences.Key<String>): JSONObject {
         return runCatching { JSONObject(dataStore.data.first()[key] ?: "{}") }.getOrElse { JSONObject() }
